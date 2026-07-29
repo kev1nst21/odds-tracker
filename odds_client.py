@@ -11,6 +11,9 @@ market IDs can vary per sport. flatten_odds() below is written defensively
 so it won't crash on an unfamiliar shape, but confirm the mapping of
 market/outcome IDs to human-readable labels before trusting alert text.
 """
+import json
+import time
+
 import requests
 
 from config import ODDSPAPI_BASE_URL, ODDSPAPI_KEY
@@ -20,16 +23,41 @@ class OddsPapiError(RuntimeError):
     pass
 
 
+# The free tier throttles hard (confirmed live 2026-07-29: 429 RATE_LIMITED,
+# "Please wait 0.12 seconds before making another request"). We poll ~30
+# bookmakers x several tournament chunks per run, so a fixed pause between
+# every call plus honoring the API's own retryAfter/retryMs on 429 keeps us
+# under the limit instead of failing the whole run on the first throttle hit.
+MIN_REQUEST_INTERVAL_SEC = 0.25
+MAX_RETRIES = 5
+
+
 def _get(path: str, params: dict) -> dict:
     if not ODDSPAPI_KEY:
         raise OddsPapiError(
             "ODDSPAPI_KEY is not set. Copy .env.example to .env and fill it in."
         )
     params = {**params, "apiKey": ODDSPAPI_KEY}
-    resp = requests.get(f"{ODDSPAPI_BASE_URL}{path}", params=params, timeout=20)
-    if resp.status_code != 200:
-        raise OddsPapiError(f"{resp.status_code} from {path}: {resp.text[:500]}")
-    return resp.json()
+
+    for attempt in range(MAX_RETRIES):
+        resp = requests.get(f"{ODDSPAPI_BASE_URL}{path}", params=params, timeout=20)
+        if resp.status_code == 429:
+            wait_sec = MIN_REQUEST_INTERVAL_SEC * (attempt + 1)
+            try:
+                body = resp.json()
+                retry_ms = body.get("error", {}).get("retryMs")
+                if retry_ms:
+                    wait_sec = max(wait_sec, float(retry_ms) / 1000)
+            except (ValueError, json.JSONDecodeError):
+                pass
+            time.sleep(wait_sec)
+            continue
+        time.sleep(MIN_REQUEST_INTERVAL_SEC)
+        if resp.status_code != 200:
+            raise OddsPapiError(f"{resp.status_code} from {path}: {resp.text[:500]}")
+        return resp.json()
+
+    raise OddsPapiError(f"Gave up on {path} after {MAX_RETRIES} retries (rate limited).")
 
 
 def list_sports() -> list:
