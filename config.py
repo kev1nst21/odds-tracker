@@ -111,6 +111,18 @@ MAX_SIGNAL_PRICE = float(os.getenv("MAX_SIGNAL_PRICE", "12.0"))
 # the model's own error bars.
 MIN_EDGE_PCT = float(os.getenv("MIN_EDGE_PCT", "2.0"))
 
+# A bookmaker counts as "hasn't moved yet" -- i.e. still worth betting into --
+# only if its price is at least this much above where the books that DID move
+# have settled. Anything tighter is not a real entry, just rounding.
+ENTRY_MIN_GAP_PCT = float(os.getenv("ENTRY_MIN_GAP_PCT", "3.0"))
+
+# The draw is never bet (user decision, 2026-07-29) -- only the two match
+# winners are actionable. Draw prices are still FETCHED and still feed the
+# no-vig fair-price calculation, because removing a leg from a 3-way market
+# would make the margin maths wrong; they are only hidden from the cards and
+# excluded from being picked as a bet.
+EXCLUDE_DRAW = os.getenv("EXCLUDE_DRAW", "1") not in ("0", "false", "False")
+
 
 # Purely informational -- how often .github/workflows/poll.yml is scheduled to
 # run. Nothing enforces this in code; it's shown on the dashboard so a reader

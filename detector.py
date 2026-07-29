@@ -22,6 +22,7 @@ from config import (
     CASCADE_WINDOW_MINUTES,
     EXCHANGE_BOOKMAKERS,
     MAX_SIGNAL_PRICE,
+    EXCLUDE_DRAW,
 )
 import storage
 
@@ -49,6 +50,12 @@ def detect(records, fetched_at):
         if r["bookmaker"].lower() in EXCHANGE_BOOKMAKERS:
             continue
         if not r["price"] or r["price"] > MAX_SIGNAL_PRICE:
+            continue
+        # The draw is never bet, so tracking draw moves would only add rows to
+        # tracked_alerts that can never be acted on and would skew the win-rate
+        # stats. Draw prices are still stored in snapshots for the fair-price
+        # maths -- this only stops them becoming signals.
+        if EXCLUDE_DRAW and r["outcome_id"] == "draw":
             continue
 
         prev = storage.get_latest_price(

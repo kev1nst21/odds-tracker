@@ -20,7 +20,7 @@ from config import (
     DASHBOARD_PATH,
     SPIKE_THRESHOLD_PCT,
     POLL_INTERVAL_MINUTES,
-    MIN_EDGE_PCT,
+
 )
 import storage
 
@@ -112,19 +112,27 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .ev-head {{ display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }}
   .ev-name {{ font-size: 16px; font-weight: 700; color: var(--text); }}
   .ev-when {{ font-family: 'Share Tech Mono', monospace; font-size: 12px; color: var(--dim); }}
-  .oc {{ width: 100%; border-collapse: collapse; font-size: 13.5px; margin-bottom: 10px; }}
-  .oc td {{ padding: 6px 8px; border-bottom: 1px solid rgba(28,35,51,0.6); }}
-  .oc td:first-child {{ color: var(--text); font-weight: 600; }}
-  .oc .price {{ font-family: 'Share Tech Mono', monospace; color: var(--cyan); font-size: 14px; white-space: nowrap; }}
-  .oc .fair {{ font-family: 'Share Tech Mono', monospace; color: var(--dim); font-size: 12.5px; white-space: nowrap; }}
-  .oc .mv {{ font-family: 'Share Tech Mono', monospace; font-size: 12.5px; white-space: nowrap; }}
-  .verdict {{
-    font-size: 14px; line-height: 1.6; padding: 10px 12px; border-radius: 3px;
-    background: rgba(0,240,255,0.05); border-left: 2px solid var(--cyan); color: var(--text);
+  .flow {{ margin-bottom: 12px; }}
+  .flow-label {{ font-size: 11px; letter-spacing: 1px; color: var(--dim); font-family: 'Share Tech Mono', monospace; text-transform: uppercase; }}
+  .flow-name {{ font-size: 18px; font-weight: 700; color: var(--text); margin: 2px 0 6px; }}
+  .flow-prices {{ font-size: 20px; font-family: 'Share Tech Mono', monospace; color: var(--dim); }}
+  .flow-prices .old {{ color: var(--green); font-size: 24px; }}
+  .flow-prices .new {{ color: var(--red); font-size: 24px; }}
+  .flow-prices .arr {{ color: var(--dim); margin: 0 6px; }}
+  .flow-prices .pct {{ color: var(--red); font-size: 15px; }}
+  .flow-books {{ font-size: 12.5px; color: var(--dim); font-family: 'Share Tech Mono', monospace; margin-top: 5px; }}
+  .act {{ padding: 12px 14px; border-radius: 3px; }}
+  .act.good {{ background: rgba(43,255,168,0.08); border-left: 3px solid var(--green); }}
+  .act.bad {{ background: rgba(255,59,92,0.07); border-left: 3px solid var(--red); }}
+  .act-head {{ font-size: 17px; font-weight: 700; color: var(--green); margin-bottom: 4px; }}
+  .act.bad .act-head {{ color: var(--red); }}
+  .act-sub {{ font-size: 12px; color: var(--dim); margin-bottom: 7px; font-family: 'Share Tech Mono', monospace; }}
+  .entry {{
+    display: inline-block; font-family: 'Share Tech Mono', monospace; font-size: 13px;
+    padding: 5px 11px; margin: 0 7px 7px 0; border-radius: 3px; color: var(--text);
+    background: rgba(255,255,255,0.04); border: 1px solid rgba(43,255,168,0.35);
   }}
-  .verdict.good {{ background: rgba(43,255,168,0.07); border-left-color: var(--green); }}
-  .verdict b {{ color: var(--cyan); }}
-  .verdict.good b {{ color: var(--green); }}
+  .entry b {{ color: var(--green); font-size: 15px; }}
   .badge {{
     font-size: 11px; font-family: 'Share Tech Mono', monospace; padding: 3px 8px;
     border-radius: 3px; letter-spacing: 0.5px;
@@ -132,7 +140,9 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .badge.v {{ background: rgba(43,255,168,0.15); color: var(--green); border: 1px solid rgba(43,255,168,0.4); }}
   .badge.m {{ background: rgba(123,91,255,0.15); color: #b4a1ff; border: 1px solid rgba(123,91,255,0.4); }}
   .badge.s {{ background: rgba(255,176,32,0.15); color: var(--amber); border: 1px solid rgba(255,176,32,0.45); letter-spacing: 0; }}
+  .badge.c {{ background: rgba(255,59,92,0.12); color: var(--red); border: 1px solid rgba(255,59,92,0.35); }}
   .ev.starred {{ border-left: 3px solid var(--amber); }}
+  .ev.closed {{ border-left: 3px solid var(--panel-border); opacity: 0.75; }}
   .up {{ color: var(--green); }}
   .down {{ color: var(--red); }}
   .empty {{ color: var(--dim); font-style: italic; font-size: 13px; }}
@@ -182,16 +192,18 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 
   <div class="card">
     <h2>💎 Сводка по рынку</h2>
-    <p class="note">Одна карточка на событие. <b>Коэффициент</b> — разброс по всему рынку
-    от минимума до максимума. <b>Справедливо</b> — расчётная цена без маржи; если где-то
-    дают выше неё, есть запас (💎). <b>Просело у N из M</b> — у скольких контор из
-    котирующих линия пошла вниз.<br>
-    <b>⭐ Звёзды — это уверенность в сигнале, и считаются они по числу контор, а не по
-    величине скачка.</b> Одна контора подвинула цену — это может быть чья-то одиночная
-    ставка или ошибка трейдера. Когда одно и то же просело сразу у многих независимых
-    контор за полчаса — это заходят информированные деньги, и такое движение отрабатывает
-    заметно чаще. ⭐ — просело у одной конторы, ⭐⭐ — у двух-трёх, ⭐⭐⭐ — у четырёх и больше
-    либо при участии шарп-конторы. Порог для алерта — движение от {threshold_pct}%.</p>
+    <p class="note"><b>Как это читать.</b> Если коэффициент был 3.00 и где-то просел
+    до 2.10 — значит, на этот исход загрузили деньги. Ставим мы <b>на тот же исход</b>
+    и там, где цена ещё не упала, то есть забираем старые 3.00. Обратную сторону не
+    рассматриваем никогда: она подорожала просто механически, потому что деньги пошли
+    против неё.<br>
+    <b>⭐ Звёзды — уверенность, и считаются по числу контор, а не по величине скачка.</b>
+    Одна контора подвинула цену — это может быть чья-то одиночная ставка или ошибка
+    трейдера. Когда то же самое просело сразу у многих независимых контор за полчаса —
+    это заходят информированные деньги. ⭐ одна контора, ⭐⭐ две-три, ⭐⭐⭐ четыре и больше
+    либо с участием шарп-конторы.<br>
+    В бота уходят только события с падением от {threshold_pct}%, где ещё есть где
+    поставить. Ничья в футболе не рассматривается.</p>
     {summaries_html}
   </div>
 
@@ -262,67 +274,78 @@ def _ago(value, now=None) -> str:
     return f"{hours // 24} дн назад"
 
 
-def _outcome_row(o: dict) -> str:
-    if abs(o["max_price"] - o["min_price"]) < 0.01:
-        price = f"{o['max_price']:.2f}"
-    else:
-        price = f"{o['min_price']:.2f} – {o['max_price']:.2f}"
-
-    fair = f"справедливо {o['fair_price']:.2f}" if o.get("fair_price") else ""
-    if o.get("down_count"):
-        pct = f" {o['avg_down_pct']:.1f}%" if o.get("avg_down_pct") is not None else ""
-        move = (f"<span class='down'>↓ просело у {o['down_count']} "
-                f"из {o['books_count']}{pct}</span>")
-    else:
-        move = ""
-    return (
-        f"<tr><td>{html.escape(o['name'])}</td>"
-        f"<td class='price'>{price}</td>"
-        f"<td class='fair'>{fair}</td>"
-        f"<td class='mv'>{move}</td></tr>"
-    )
-
-
 def _event_card(s: dict) -> str:
+    bet = s.get("bet") or {}
     stars = s.get("stars", 0)
-    cls = "starred" if stars >= 3 else ("value" if s.get("has_value") else ("move" if s.get("has_move") else ""))
+    cls = "value" if s.get("has_entry") else "closed"
+    if stars >= 3 and s.get("has_entry"):
+        cls = "starred"
+
     badges = ""
     if stars:
         badges += f"<span class='badge s'>{'⭐' * stars}</span> "
-    if s.get("has_value"):
-        badges += f"<span class='badge v'>💎 запас {s['best_value']['edge_pct']:+.1f}%</span> "
-    if s.get("has_move"):
-        badges += "<span class='badge m'>📈 линия двигается</span>"
+    if s.get("has_entry"):
+        badges += f"<span class='badge v'>✅ вход открыт</span> "
+    else:
+        badges += "<span class='badge c'>⛔️ вход закрыт</span> "
+    if s.get("big_move"):
+        badges += "<span class='badge m'>📈 от 10%</span>"
 
     name = f"{html.escape(s.get('home_team') or '?')} — {html.escape(s.get('away_team') or '?')}"
-    rows = "".join(_outcome_row(o) for o in s["outcomes"])
-    vcls = "verdict good" if s.get("has_value") else "verdict"
-    extra = ""
-    if s.get("best_value"):
-        extra = f" Лучшая цена у <b>{html.escape(s['best_value']['best_book'])}</b>."
+    outcome = html.escape(bet.get("name") or "—")
+
+    flow = (
+        f"<div class='flow'>"
+        f"<div class='flow-label'>💰 Деньги зашли на</div>"
+        f"<div class='flow-name'>{outcome}</div>"
+        f"<div class='flow-prices'>был <b class='old'>{bet['old_price']:.2f}</b>"
+        f" <span class='arr'>→</span> просел до <b class='new'>{bet['new_price']:.2f}</b>"
+        f" <span class='pct'>({abs(bet['drop_pct']):.1f}%)</span></div>"
+        f"<div class='flow-books'>просело у {bet['down_count']} из {bet['books_count']} контор</div>"
+        f"</div>"
+    )
+
+    if s.get("has_entry"):
+        chips = "".join(
+            f"<span class='entry'>{html.escape(b)} <b>{p:.2f}</b></span>"
+            for b, p in bet["entries"]
+        )
+        action = (
+            f"<div class='act good'><div class='act-head'>✅ СТАВИМ {outcome} "
+            f"за {bet['entry_price']:.2f}</div>"
+            f"<div class='act-sub'>ещё не просело у:</div><div>{chips}</div></div>"
+        )
+    else:
+        action = ("<div class='act bad'><div class='act-head'>⛔️ Вход закрыт</div>"
+                  "<div class='act-sub'>просело у всех контор — старую цену взять негде</div></div>")
+
     return (
         f"<div class='ev {cls}'>"
         f"<div class='ev-head'><div><div class='ev-name'>{name}</div>"
         f"<div class='ev-when'>старт {_fmt_start(s.get('start_time'))}</div></div>"
         f"<div>{badges}</div></div>"
-        f"<table class='oc'>{rows}</table>"
-        f"<div class='{vcls}'><b>ИТОГ:</b> {html.escape(s['verdict'])}{extra}</div>"
+        f"{flow}{action}"
         f"</div>"
     )
 
 
-def _summaries_html(summaries: list, limit: int = 40) -> str:
-    interesting = [s for s in summaries if s.get("has_value") or s.get("has_move")]
-    shown = interesting or summaries
+def _summaries_html(summaries: list, limit: int = 30) -> str:
+    shown = [s for s in summaries if s.get("bet")]
     if not shown:
-        return '<p class="empty">Данных пока нет — дождитесь первого опроса.</p>'
-    out = "".join(_event_card(s) for s in shown[:limit])
-    if len(shown) > limit:
-        out += (f"<p class='empty'>...и ещё {len(shown) - limit} "
-                f"{_plural(len(shown) - limit, 'событие', 'события', 'событий')}.</p>")
-    if not interesting:
-        out = ('<p class="note">Сейчас ни по одному событию нет ни движения линии, '
-               'ни запаса над справедливой ценой — показаны текущие котировки.</p>' + out)
+        return ('<p class="empty">Сейчас движений нет — линии стоят на месте. '
+                'Карточки появятся, как только рынок начнёт двигаться.</p>')
+    big = [s for s in shown if s.get("big_move")]
+    small = [s for s in shown if not s.get("big_move")]
+
+    out = "".join(_event_card(s) for s in big[:limit])
+    if not big:
+        out += ('<p class="empty">Движений от 10% сейчас нет. '
+                'Ниже — то, что двигается слабее порога.</p>')
+    rest = small[:max(0, limit - len(big))]
+    if rest:
+        out += ("<p class='note' style='margin-top:16px'>Ниже — движения слабее 10%. "
+                "В бота они не отправляются, показаны только для наблюдения.</p>")
+        out += "".join(_event_card(s) for s in rest)
     return out
 
 
@@ -392,7 +415,6 @@ def render_dashboard(summaries: list, quota: dict = None):
         freshness_label="ДАННЫЕ АКТУАЛЬНЫ" if fresh else "ДАННЫЕ УСТАРЕЛИ",
         poll_interval=POLL_INTERVAL_MINUTES,
         threshold_pct=f"{SPIKE_THRESHOLD_PCT * 100:.0f}",
-        min_edge=f"{MIN_EDGE_PCT:.0f}",
         summaries_html=_summaries_html(summaries or []),
         stats_card=_stats_card(storage.alert_stats()),
     )

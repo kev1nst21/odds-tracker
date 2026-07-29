@@ -1,31 +1,49 @@
-"""Consolidates a raw poll into ONE summary per event, plus the analyst verdict.
+"""Turns a raw poll into ONE actionable card per event.
 
-Why this module exists (2026-07-29, user request): the previous output was
-per-line, so a single football match produced four separate alerts -- "Larne FC
-+16.7%", "Draw +13.3%", "Draw -15.4%", "Larne FC +11.1%" -- which is the same
-market move seen from different sides at different bookmakers. Unreadable, and
-it made the alert feed look busier than the market actually was. Everything
-about one event now collapses into a single row/message.
+THE STRATEGY THIS IMPLEMENTS (stated by the user, 2026-07-29 -- read this
+before changing anything here, because it is not the same as generic
+"find positive expected value" logic):
 
-The analyst part is the standard no-vig fair-price method used in professional
-betting:
+    "Если коэффициент был 1.5, а где-то мы увидели, что просел до 1.3, то мы
+     ставим на 1.5 и не рассматриваем вариант поставить в другую сторону
+     из-за того, что коэффициент там подрос. То есть мы видим, что на какой-то
+     конторе грузанули денег на какое-то событие, и нам нужно прогрузить на
+     тех конторах, где этого не было."
 
-  1. Take a sharp book's full market for the event (Pinnacle first, 1xBet as
-     fallback). Sharp books price closest to true probability because they
-     accept large bets and let the money correct them.
-  2. Convert its decimal odds to implied probabilities: p_i = 1 / odds_i.
-  3. Those sum to more than 1 -- the excess is the bookmaker's margin (vig).
-     S = sum(p_i), typically 1.02-1.08.
-  4. Remove it proportionally: fair_p_i = p_i / S, so fair_odds_i = odds_i * S.
+So the whole product reduces to four questions per event:
 
-fair_odds is the break-even price: bet above it and the wager has positive
-expected value *under this model*, bet below and it doesn't. That is exactly
-the "от какого коэффициента можно ставить" number.
+    1. WHICH outcome did money go into?  -> the side whose price DROPPED.
+    2. HOW FAR did it drop, and at how many books?  -> was 1.50, now 1.30,
+       at N of M bookmakers. Breadth is the confidence signal: one book moving
+       can be a single punter or a trader's typo, the same outcome dropping at
+       many independent books inside half an hour is informed money.
+    3. WHERE can that same outcome still be backed at the OLD price?  -> the
+       bookmakers that haven't moved yet. THIS is the bet.
+    4. If nobody is left offering the old price, say so plainly -- the entry
+       is gone and there is nothing to do.
 
-Hard limits worth stating plainly: this assumes the sharp book is correctly
-priced, which is an assumption and not a fact; it says nothing about how much
-to stake; and a positive edge is a long-run statistical statement, not a
-prediction that any single bet wins. The output is a calculation, not advice.
+Two consequences that are easy to get wrong:
+
+  * The opposite side drifting UP is not a signal. When money hits the home
+    side, the away price mechanically rises; betting the away side because
+    "its odds improved" is backing the side the market just moved against.
+    Rises are therefore never turned into bets here.
+  * A drop that has already reached every bookmaker is not actionable, however
+    dramatic it looks. The card still shows it (it's real information about
+    where money went) but it is explicitly marked as a closed entry.
+
+The no-vig fair price is still computed and shown as a secondary reference --
+it answers "is this price sane in absolute terms" -- but it does not drive the
+recommendation. The recommendation comes from the money-flow logic above.
+
+Fair price method, for reference: take a sharp book's full market, convert to
+implied probabilities p_i = 1/odds_i, note they sum to S > 1 (the margin), and
+remove it proportionally -> fair_odds_i = odds_i * S.
+
+Limits worth stating plainly: a price lagging behind the market is not a
+guarantee of anything -- sometimes the move is wrong, sometimes the lagging
+book simply hasn't been asked for that bet yet and will refuse or void it.
+Nothing here is advice, and none of it says how much to stake.
 """
 from collections import defaultdict
 
@@ -33,18 +51,19 @@ from config import (
     ASIAN_SHARP_BOOKMAKERS,
     EXCHANGE_BOOKMAKERS,
     MAX_SIGNAL_PRICE,
-    MIN_EDGE_PCT,
+    ENTRY_MIN_GAP_PCT,
+    EXCLUDE_DRAW,
+    SPIKE_THRESHOLD_PCT,
 )
 
-# Order matters: whichever appears first and has a full market gets used as the
-# fair-price reference.
 _SHARP_PRIORITY = list(ASIAN_SHARP_BOOKMAKERS)
-
 _SIDE_ORDER = {"home": 0, "draw": 1, "away": 2}
 
 
 def is_signal_book(bookmaker: str) -> bool:
-    """Exchanges are excluded from anything that generates a signal."""
+    """Exchanges never generate signals -- their thin markets swing on one
+    random user's order (confirmed live: betfair_ex_eu went 2.28 -> 9.20 in a
+    single window while every real bookmaker barely moved)."""
     return (bookmaker or "").lower() not in EXCHANGE_BOOKMAKERS
 
 
@@ -57,8 +76,6 @@ def _usable(record) -> bool:
 
 
 def _outcome_name(record, side):
-    """Human label for an outcome: the team/player name where we have it,
-    'Ничья' for the draw."""
     if side == "draw":
         return "Ничья"
     if side == "home":
@@ -70,8 +87,6 @@ def _outcome_name(record, side):
 
 
 def _fair_prices(sharp_market: dict) -> dict:
-    """no-vig fair odds per side. sharp_market: {side: decimal_odds} from ONE
-    bookmaker. Needs at least 2 sides or the margin can't be identified."""
     prices = {s: p for s, p in sharp_market.items() if p and p > 1}
     if len(prices) < 2:
         return {}
@@ -82,8 +97,6 @@ def _fair_prices(sharp_market: dict) -> dict:
 
 
 def _pick_sharp_market(by_book: dict) -> tuple:
-    """Return (bookmaker, {side: price}) for the highest-priority sharp book
-    that quotes a full-enough market, or (None, {})."""
     for book in _SHARP_PRIORITY:
         market = by_book.get(book)
         if market and len(market) >= 2:
@@ -92,14 +105,12 @@ def _pick_sharp_market(by_book: dict) -> tuple:
 
 
 def _stars(down_books: set, sharp_moved: bool) -> int:
-    """Confidence, 0-3, from how BROAD the move is rather than how big.
+    """Confidence 0-3, from how BROAD the drop is rather than how big.
 
-    One bookmaker shortening a price proves nothing -- it could be a trader
-    correcting an error, or a single large recreational bet. The same outcome
-    shortening at many independent books within one 30-minute window is the
-    classic "steam move": informed money hitting the market everywhere at once,
-    which is the pattern actually worth acting on. A sharp book joining the move
-    counts extra, since those books move on money rather than on copying others.
+    One bookmaker shortening proves little. The same outcome shortening at many
+    independent books inside one polling window is the classic "steam move" --
+    informed money hitting the market everywhere at once. A sharp book joining
+    counts extra, since those move on money rather than on copying rivals.
     """
     n = len(down_books)
     if n == 0:
@@ -111,16 +122,8 @@ def _stars(down_books: set, sharp_moved: bool) -> int:
 
 
 def build_event_summaries(records: list, spikes: list = None, movements: list = None) -> list:
-    """One dict per event, sorted so the most actionable comes first.
-
-    Each summary carries every outcome with its price range across the market
-    (min-max), the best price available, the computed fair price, the edge over
-    fair, how many bookmakers moved the line and in which direction, and a
-    0-3 star confidence score derived from that breadth.
-    """
+    """One dict per event, most actionable first."""
     spikes = spikes or []
-    # Fall back to spikes when no full movement list is supplied (older callers
-    # and tests) -- breadth scoring is then coarser but still works.
     movements = movements if movements is not None else spikes
 
     by_event = defaultdict(list)
@@ -128,16 +131,11 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
         if _usable(r):
             by_event[r["fixture_id"]].append(r)
 
-    # Consolidate movement per (event, side). The previous per-line output
-    # double-counted the same market move across bookmakers; here every book
-    # that moved is collected once so breadth can be measured.
     moves = defaultdict(list)
     for m in movements:
         if is_signal_book(m.get("bookmaker")) and float(m.get("price") or 0) <= MAX_SIGNAL_PRICE:
-            moves[(m["fixture_id"], m["outcome_id"])].append(
-                (m["bookmaker"].lower(), m["pct_change"])
-            )
-    # Which sides actually spiked past the alert threshold this cycle.
+            moves[(m["fixture_id"], m["outcome_id"])].append(m)
+
     spiked_sides = {(s["fixture_id"], s["outcome_id"]) for s in spikes
                     if is_signal_book(s.get("bookmaker"))}
 
@@ -156,75 +154,77 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
 
         outcomes = []
         for side, side_rows in by_side.items():
-            prices = [float(x["price"]) for x in side_rows]
-            best = max(prices)
-            best_book = max(side_rows, key=lambda x: float(x["price"]))["bookmaker"]
-            fair_price = fair.get(side)
-            edge_pct = ((best / fair_price) - 1) * 100 if fair_price else None
+            prices_by_book = {r["bookmaker"].lower(): float(r["price"]) for r in side_rows}
+            prices = list(prices_by_book.values())
+
             move_list = moves.get((fixture_id, side)) or []
-            down_books = {b for b, p in move_list if p < 0}
-            up_books = {b for b, p in move_list if p > 0}
-            down_moves = [p for _, p in move_list if p < 0]
-            avg_move = (sum(p for _, p in move_list) / len(move_list) * 100) if move_list else None
-            avg_down = (sum(down_moves) / len(down_moves) * 100) if down_moves else None
+            dropped = [m for m in move_list if m["pct_change"] < 0]
+            down_books = {m["bookmaker"].lower() for m in dropped}
             sharp_down = any(b in ASIAN_SHARP_BOOKMAKERS for b in down_books)
+
+            old_price = new_price = drop_pct = None
+            entries = []
+            if dropped:
+                # "Было" = the best price on offer before money arrived; "стало"
+                # = where the books that moved have settled. Using max(prev) and
+                # min(current) frames the move the way it's actually acted on:
+                # the widest gap between the old price and the new consensus.
+                old_price = max(m["prev_price"] for m in dropped)
+                new_price = min(m["price"] for m in dropped)
+                if old_price:
+                    drop_pct = (new_price - old_price) / old_price * 100
+
+                # The entry: books that have NOT moved and still price this
+                # outcome meaningfully above where the market went.
+                threshold = new_price * (1 + ENTRY_MIN_GAP_PCT / 100.0)
+                entries = sorted(
+                    ((b, p) for b, p in prices_by_book.items()
+                     if b not in down_books and p >= threshold),
+                    key=lambda bp: -bp[1],
+                )
+
+            fair_price = fair.get(side)
             outcomes.append({
                 "side": side,
                 "name": _outcome_name(sample, side),
                 "min_price": min(prices),
-                "max_price": best,
-                "best_book": best_book,
+                "max_price": max(prices),
                 "books_count": len(prices),
-                "sharp_price": sharp_market.get(side),
                 "fair_price": fair_price,
-                "edge_pct": edge_pct,
-                "move_pct": avg_move,
+                "old_price": old_price,
+                "new_price": new_price,
+                "drop_pct": drop_pct,
                 "down_count": len(down_books),
-                "up_count": len(up_books),
-                "avg_down_pct": avg_down,
                 "sharp_moved": sharp_down,
                 "stars": _stars(down_books, sharp_down),
                 "spiked": (fixture_id, side) in spiked_sides,
+                "entries": entries[:3],
+                "entry_price": entries[0][1] if entries else None,
+                "entry_book": entries[0][0] if entries else None,
+                "entry_gap_pct": ((entries[0][1] / new_price - 1) * 100)
+                                 if entries and new_price else None,
             })
 
         outcomes.sort(key=lambda o: _SIDE_ORDER.get(o["side"], 9))
+        # The draw is dropped only AFTER the fair-price maths above, which needs
+        # the full 3-way market to measure the bookmaker's margin correctly.
+        if EXCLUDE_DRAW:
+            outcomes = [o for o in outcomes if o["side"] != "draw"]
 
-        # Where the market went, as ONE statement: the side backed by the most
-        # bookmakers wins, with the size of the drop as the tie-break. Counting
-        # books first (rather than picking the single biggest percentage) is
-        # what stops one outlier book from defining the event's direction.
+        # The bet is on the side money went INTO. Never on the side that merely
+        # drifted up as a mechanical consequence -- see the module docstring.
         shortening = [o for o in outcomes if o["down_count"] > 0]
+        bet = None
         if shortening:
-            # Prefer an outcome that actually crossed the alert threshold, then
-            # the one most bookmakers agree on, then the biggest drop. Without
-            # the first key the headline can land on a 1.6% drift while the
-            # outcome that genuinely spiked goes unmentioned.
-            lead = max(shortening, key=lambda o: (o["spiked"], o["down_count"], -(o["avg_down_pct"] or 0)))
-            movement = {
-                "name": lead["name"],
-                "pct": lead["avg_down_pct"] or 0.0,
-                "toward": True,
-                "books": lead["down_count"],
-                "total_books": lead["books_count"],
-                "sharp": lead["sharp_moved"],
-                "stars": lead["stars"],
-                "spiked": lead["spiked"],
-            }
-        else:
-            movement = None
+            bet = max(shortening, key=lambda o: (o["spiked"], o["down_count"],
+                                                 -(o["drop_pct"] or 0)))
 
-        value = [o for o in outcomes if o["edge_pct"] is not None and o["edge_pct"] >= MIN_EDGE_PCT]
-        value.sort(key=lambda o: -o["edge_pct"])
-        best_value = value[0] if value else None
-
-        # The badge must describe the move the verdict actually talks about, so
-        # take the lead outcome's score rather than the best score anywhere on
-        # the event.
-        stars = movement["stars"] if movement else 0
-        # Only report an event as "moving" once at least one book crossed the
-        # alert threshold -- broad sub-threshold drift still sets the stars and
-        # the direction, but on its own it isn't news.
-        has_move = bool(movement and any(o["spiked"] for o in outcomes))
+        has_entry = bool(bet and bet["entry_price"])
+        stars = bet["stars"] if bet else 0
+        # Only a drop of at least the alert threshold is worth a notification.
+        # Sub-threshold drift still shows on the site but must never reach the
+        # bot -- the user explicitly does not want small moves pushed to them.
+        big_enough = bool(bet and abs(bet["drop_pct"] or 0) >= SPIKE_THRESHOLD_PCT * 100)
 
         summaries.append({
             "fixture_id": fixture_id,
@@ -233,75 +233,60 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
             "home_team": sample.get("home_team"),
             "away_team": sample.get("away_team"),
             "outcomes": outcomes,
-            "movement": movement,
+            "bet": bet,
             "sharp_book": sharp_book,
-            "best_value": best_value,
-            "has_value": bool(best_value),
-            "has_move": has_move,
+            "has_entry": has_entry,
+            "entry_closed": bool(bet and not has_entry),
+            "big_move": big_enough,
+            "alertable": big_enough and has_entry,
             "stars": stars,
-            "verdict": _verdict(movement, best_value, outcomes),
+            "verdict": _verdict(bet, has_entry),
         })
 
-    # Most trustworthy first: confidence stars, then value + movement, then the
-    # size of the edge.
+    # Actionable first: a big move you can still get on, then confidence, then
+    # how much room is left.
     summaries.sort(key=lambda s: (
+        not s["alertable"],
+        not s["has_entry"],
         -s["stars"],
-        not (s["has_value"] and s["has_move"]),
-        not s["has_value"],
-        not s["has_move"],
-        -(s["best_value"]["edge_pct"] if s["best_value"] else 0),
+        -((s["bet"] or {}).get("entry_gap_pct") or 0),
     ))
     return summaries
 
 
-def _verdict(movement, best_value, outcomes) -> str:
-    """One plain-language conclusion per event. States the entry price when the
-    model finds one, and says so directly when it doesn't -- silence here would
-    read as 'no opinion' rather than 'no edge'."""
-    parts = []
-    if movement:
-        books = movement.get("books", 0)
-        total = movement.get("total_books", 0)
-        stars = movement.get("stars", 0)
-        parts.append(
-            f"Линия просела на «{movement['name']}» у {books} из {total} контор "
-            f"(в среднем {abs(movement['pct']):.1f}%)"
-            + (", включая шарпов" if movement.get("sharp") else "") + "."
-        )
-        # The factual count above and the strength label below must never
-        # disagree, so the label is driven by the same star score shown on the
-        # card -- previously the count decided the wording and the stars were
-        # computed separately, which produced "3 из 13 ... сигнал средний" on
-        # an event badged three stars.
-        breadth = (
-            "Движение подтверждено по всему рынку" if books >= 4
-            else "Движение подтвердили несколько контор" if books >= 2
-            else "Просело пока только у шарп-конторы, а она обычно идёт первой" if movement.get("sharp")
-            else "Просело только у одной конторы"
-        )
-        strength = (
-            "сигнал сильный" if stars >= 3
-            else "сигнал средний" if stars == 2
-            else "сигнал слабый, может быть и шум"
-        )
-        parts.append(f"{breadth} — {strength}.")
+def _verdict(bet, has_entry) -> str:
+    """The conclusion, phrased the way the user actually reasons about the bet:
+    'был коэффициент 3, просел до 2.1, желательно проставить за 3'."""
+    if not bet:
+        return "Движения нет — линия стоит на месте, входа нет."
 
-    if best_value:
+    name = bet["name"]
+    parts = [
+        f"«{name}»: был коэффициент {bet['old_price']:.2f}, просел до "
+        f"{bet['new_price']:.2f} у {bet['down_count']} из {bet['books_count']} контор"
+        + (", включая шарпов" if bet["sharp_moved"] else "") + "."
+    ]
+
+    if has_entry:
+        where = ", ".join(f"{b} — {p:.2f}" for b, p in bet["entries"])
         parts.append(
-            f"Ставить «{best_value['name']}» можно от {best_value['fair_price']:.2f}. "
-            f"Сейчас на рынке дают до {best_value['max_price']:.2f} — "
-            f"запас {best_value['edge_pct']:+.1f}%."
+            f"Желательно проставить «{name}» за {bet['entry_price']:.2f}. "
+            f"Ещё не просело у: {where}."
         )
     else:
-        priced = [o for o in outcomes if o["fair_price"]]
-        if priced:
-            closest = max(priced, key=lambda o: o["edge_pct"] if o["edge_pct"] is not None else -99)
-            parts.append(
-                f"Ценности нет: справедливый коэффициент «{closest['name']}» — "
-                f"{closest['fair_price']:.2f}, а лучший на рынке всего {closest['max_price']:.2f}. "
-                f"Ждём цену выше."
-            )
-        else:
-            parts.append("Расчёт невозможен: шарп-контора не дала полную линию по этому событию.")
+        parts.append(
+            "Проставить по старой цене уже негде — просело у всех контор, вход закрыт."
+        )
 
+    stars = bet["stars"]
+    breadth = (
+        "Движение подтверждено по всему рынку" if bet["down_count"] >= 4
+        else "Движение подтвердили несколько контор" if bet["down_count"] >= 2
+        else "Пока подвинулась только шарп-контора, а она обычно идёт первой"
+        if bet["sharp_moved"] else "Подвинулась пока только одна контора"
+    )
+    strength = ("сигнал сильный" if stars >= 3
+                else "сигнал средний" if stars == 2
+                else "сигнал слабый, может быть и шум")
+    parts.append(f"{breadth} — {strength}.")
     return " ".join(parts)
