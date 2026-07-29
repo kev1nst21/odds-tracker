@@ -17,6 +17,31 @@ load_dotenv()
 THEODDSAPI_KEY = os.getenv("THEODDSAPI_KEY", "")
 THEODDSAPI_BASE_URL = "https://api.the-odds-api.com"
 
+# --- Second provider: OddsPapi, esports + table tennis only ---
+# The Odds API carries no esports whatsoever (verified live 2026-07-29 against
+# its full 174-sport listing), so those lines come from a separate paid plan
+# here: 4 bookmakers x 4 sports, 100,000 requests/month.
+ODDSPAPI_KEY = os.getenv("ODDSPAPI_KEY", "")
+ODDSPAPI_BASE_URL = "https://api.oddspapi.io"
+
+# sportId -> the sport_key we store it under. Ids confirmed live via
+# GET /v4/sports on 2026-07-29.
+ODDSPAPI_SPORTS = {
+    17: "esports_cs2",
+    16: "esports_dota2",
+    18: "esports_lol",
+    25: "table_tennis",
+}
+
+# Exactly the books the subscription covers -- asking for others just wastes
+# requests and returns nothing.
+ODDSPAPI_BOOKMAKERS = ["1xbet", "22bet", "188bet", "betway"]
+
+# The participants and tournaments lookups change slowly, so they're cached in
+# SQLite between runs and only refreshed this often. Without this, eight extra
+# calls per cycle would burn roughly 12,000 requests a month for nothing.
+ODDSPAPI_LOOKUP_TTL_HOURS = int(os.getenv("ODDSPAPI_LOOKUP_TTL_HOURS", "6"))
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
