@@ -1,0 +1,36 @@
+name: Poll odds every 5 minutes
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Restore odds history DB
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: odds-history-db
+          restore-keys: odds-history-db
+
+      - run: pip install -r requirements.txt
+
+      - name: Run one poll cycle
+        env:
+          ODDSPAPI_KEY: ${{ secrets.ODDSPAPI_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SPIKE_THRESHOLD_PCT: "0.08"
+        run: python main.py
+
+      # actions/cache with a fixed key just overwrites on save, which is what we want
+      # so the DB carries forward to the next scheduled run.
