@@ -12,6 +12,14 @@ on:
     - cron: "*/30 * * * *"
   workflow_dispatch: {}
 
+# pages/id-token are needed by actions/deploy-pages below; contents stays
+# read-only because the dashboard is published as a Pages artifact rather than
+# committed back to the repo (no commit noise, no push loop).
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
 # If a run somehow takes longer than the 30-minute schedule, don't let runs
 # pile up on top of each other -- newest scheduled run wins.
 concurrency:
@@ -22,6 +30,9 @@ jobs:
   poll:
     runs-on: ubuntu-latest
     timeout-minutes: 8
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -51,4 +62,16 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SPIKE_THRESHOLD_PCT: "0.08"
           RESULTS_CHECK_INTERVAL_HOURS: "3"
+          POLL_INTERVAL_MINUTES: "30"
         run: python main.py
+
+      # Publish the freshly-rendered dashboard/index.html to GitHub Pages.
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dashboard
+
+      - name: Deploy dashboard to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
