@@ -107,4 +107,3 @@ def flatten_odds(raw_fixtures: list, main_lines_only: bool = True) -> list:
                             "label": pdata.get("bookmakerOutcomeId") or str(outcome_id),
                         })
     return records
-"}
