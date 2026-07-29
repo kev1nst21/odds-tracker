@@ -106,6 +106,7 @@ def run_once():
     newly_resolved = results.check_pending_results()
 
     live_rows = analytics.find_live_anomalies(live_records)
+    logged_live = sum(1 for r in live_rows if storage.save_live_alert(r, fetched_at))
     path = dashboard.render_dashboard(summaries, quota=odds_client.LAST_QUOTA,
                                       live_rows=live_rows)
 
@@ -116,7 +117,8 @@ def run_once():
         f"{len(esports_records)} esports/table-tennis lines via OddsPapi, "
         f"{len(records)} lines total, {len(summaries)} events moved 10%+, "
         f"{actionable} with an open entry, {starred} at 3 stars, "
-        f"{logged} new bets logged, {newly_resolved} resolved, dashboard -> {path}"
+        f"{logged} prematch + {logged_live} live bets logged, "
+        f"{newly_resolved} resolved, dashboard -> {path}"
     )
     return summaries
 

@@ -55,6 +55,7 @@ from config import (
     ENTRY_MIN_GAP_PCT,
     EXCLUDE_DRAW,
     SPIKE_THRESHOLD_PCT,
+    LIVE_MIN_SPREAD_PCT,
 )
 
 _SHARP_PRIORITY = list(ASIAN_SHARP_BOOKMAKERS)
@@ -271,7 +272,7 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
     return summaries
 
 
-def find_live_anomalies(records: list, min_spread_pct: float = 25.0, limit: int = 25) -> list:
+def find_live_anomalies(records: list, min_spread_pct: float = None, limit: int = 25) -> list:
     """Odd things happening in matches that are already under way.
 
     These are NEVER bets. In-play prices move on what is happening on the pitch,
@@ -284,6 +285,7 @@ def find_live_anomalies(records: list, min_spread_pct: float = 25.0, limit: int 
 
     Returns rows sorted by how wide the disagreement is.
     """
+    min_spread_pct = LIVE_MIN_SPREAD_PCT if min_spread_pct is None else min_spread_pct
     by_side = defaultdict(list)
     for r in records:
         if _usable(r):
@@ -311,6 +313,7 @@ def find_live_anomalies(records: list, min_spread_pct: float = 25.0, limit: int 
             "start_time": sample.get("start_time"),
             "home_team": sample.get("home_team"),
             "away_team": sample.get("away_team"),
+            "side": side,
             "name": _outcome_name(sample, side),
             "low": low,
             "high": high,

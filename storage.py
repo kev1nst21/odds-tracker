@@ -9,6 +9,7 @@ small meta key-value table to throttle results-checking without a separate
 state file."""
 import os
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 
 from config import DB_PATH, FLAT_STAKE
@@ -54,6 +55,7 @@ CREATE INDEX IF NOT EXISTS idx_spike_lookup
 CREATE TABLE IF NOT EXISTS tracked_alerts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     alert_type TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'prematch',  -- 'prematch' | 'live'
     fixture_id TEXT NOT NULL,
     sport_key TEXT,
     start_time TEXT,
@@ -86,7 +88,7 @@ CREATE INDEX IF NOT EXISTS idx_tracked_alerts_lookup
 -- One alert per (event, side): if the same move keeps showing up on later
 -- polls we don't want to log it again and inflate the stats.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tracked_alerts_dedup
-    ON tracked_alerts (fixture_id, outcome_id);
+    ON tracked_alerts (kind, fixture_id, outcome_id);
 
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
@@ -250,12 +252,12 @@ def save_bet_alert(summary: dict, detected_at: str) -> bool:
         cur = conn.execute(
             """
             INSERT OR IGNORE INTO tracked_alerts
-                (alert_type, fixture_id, sport_key, start_time, home_team, away_team,
+                (alert_type, kind, fixture_id, sport_key, start_time, home_team, away_team,
                  outcome_id, outcome_name, stars, down_count, books_count,
                  old_price, new_price, entry_price, entry_book,
                  market_id, player_key, bookmaker, label, direction,
                  alert_price, detected_at, resolved)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'down', ?, ?, 0)
+            VALUES (?, 'prematch', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'down', ?, ?, 0)
             """,
             (
                 "bet",
@@ -324,31 +326,32 @@ def mark_resolved(alert_id: int, result: str, resolved_at: str, clv_pct: float =
         conn.commit()
 
 
-def alert_stats():
+def alert_stats(kind: str = "prematch"):
     """Summary for the dashboard: how many alerts we've fired, how many are
     resolved, the win rate among resolved 1X2-style alerts, and the average
     Closing Line Value -- a more statistically robust "are we beating the
     bookmakers" signal than win/loss alone, since CLV measures whether the
     market kept moving the way we called it, independent of the final score."""
     with _conn() as conn:
-        total = conn.execute("SELECT COUNT(*) AS n FROM tracked_alerts").fetchone()["n"]
-        resolved = conn.execute("SELECT COUNT(*) AS n FROM tracked_alerts WHERE resolved=1").fetchone()["n"]
-        hits = conn.execute("SELECT COUNT(*) AS n FROM tracked_alerts WHERE result='hit'").fetchone()["n"]
-        misses = conn.execute("SELECT COUNT(*) AS n FROM tracked_alerts WHERE result='miss'").fetchone()["n"]
+        k = (kind,)
+        total = conn.execute("SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=?", k).fetchone()["n"]
+        resolved = conn.execute("SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=? AND resolved=1", k).fetchone()["n"]
+        hits = conn.execute("SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=? AND result='hit'", k).fetchone()["n"]
+        misses = conn.execute("SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=? AND result='miss'", k).fetchone()["n"]
         clv_row = conn.execute(
             "SELECT AVG(clv_pct) AS avg_clv, "
             "SUM(CASE WHEN clv_continued=1 THEN 1 ELSE 0 END) AS clv_wins, "
             "SUM(CASE WHEN clv_continued IS NOT NULL THEN 1 ELSE 0 END) AS clv_n "
-            "FROM tracked_alerts WHERE clv_pct IS NOT NULL"
+            "FROM tracked_alerts WHERE kind=? AND clv_pct IS NOT NULL", k
         ).fetchone()
         recent = conn.execute(
             """
             SELECT fixture_id, home_team, away_team, outcome_name, stars,
                    old_price, new_price, entry_price, entry_book,
                    result, clv_pct, clv_continued, resolved_at
-            FROM tracked_alerts WHERE resolved=1
+            FROM tracked_alerts WHERE kind=? AND resolved=1
             ORDER BY resolved_at DESC LIMIT 20
-            """
+            """, k
         ).fetchall()
         # Flat-stake profit/loss over every graded bet, priced at the entry we
         # actually recommended. A win returns stake x (odds - 1), a loss costs
@@ -356,7 +359,7 @@ def alert_stats():
         # pushes -- we don't know what they did.
         graded = conn.execute(
             "SELECT result, entry_price FROM tracked_alerts "
-            "WHERE resolved=1 AND result IN ('hit','miss') AND entry_price IS NOT NULL"
+            "WHERE kind=? AND resolved=1 AND result IN ('hit','miss') AND entry_price IS NOT NULL", k
         ).fetchall()
         clv_n = clv_row["clv_n"] or 0
         profit = 0.0
@@ -376,6 +379,7 @@ def alert_stats():
             "avg_clv_pct": clv_row["avg_clv"],
             "clv_continued_rate": (clv_row["clv_wins"] / clv_n * 100) if clv_n else None,
             "clv_n": clv_n,
+            "kind": kind,
             "stake": FLAT_STAKE,
             "graded_n": len(graded),
             "staked": staked,
@@ -385,7 +389,41 @@ def alert_stats():
         }
 
 
-def recent_bets(limit: int = 5):
+def save_live_alert(row: dict, detected_at: str) -> bool:
+    """Log a live signal -- a bookmaker still offering a price the rest of the
+    in-play market has already moved away from. Kept in the same table as
+    pre-match bets but under kind='live', because the two have to be judged
+    separately: they are different strategies with different hit profiles, and
+    averaging them together would hide which one actually works."""
+    if not row.get("high"):
+        return False
+    with _conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO tracked_alerts
+                (alert_type, kind, fixture_id, sport_key, start_time, home_team, away_team,
+                 outcome_id, outcome_name, stars, down_count, books_count,
+                 old_price, new_price, entry_price, entry_book,
+                 market_id, player_key, bookmaker, label, direction,
+                 alert_price, detected_at, resolved)
+            VALUES ('live', 'live', ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 'h2h', '-', ?, ?, 'down', ?, ?, 0)
+            """,
+            (
+                row["fixture_id"], row.get("sport_key"), row.get("start_time"),
+                row.get("home_team"), row.get("away_team"),
+                row["side"], row["name"],
+                row.get("books_count"), row.get("books_count"),
+                row.get("median"), row.get("median"),
+                row["high"], row["outlier_book"],
+                row["outlier_book"], row["name"],
+                row["high"], detected_at,
+            ),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def recent_bets(limit: int = 5, kind: str = "prematch"):
     """The last N bets we called, resolved or not. Unlike alert_stats()['recent']
     this deliberately includes pending ones -- right after a stats reset there
     are no finished matches yet, and a panel that renders empty for hours looks
@@ -397,11 +435,41 @@ def recent_bets(limit: int = 5):
                    down_count, books_count, old_price, new_price,
                    entry_price, entry_book, start_time, detected_at,
                    resolved, result, clv_pct, resolved_at
-            FROM tracked_alerts
+            FROM tracked_alerts WHERE kind=?
             ORDER BY detected_at DESC LIMIT ?
             """,
-            (limit,),
+            (kind, limit),
         ).fetchall()
+
+
+def coverage_stats(hours: int = 24):
+    """Honest scale-of-operation numbers for the header.
+
+    Everything here is counted from what actually landed in the database over
+    the window -- no estimates, no multipliers. It reads impressively because
+    the pipeline genuinely does this much work, not because the numbers were
+    dressed up.
+    """
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS lines, COUNT(DISTINCT fixture_id) AS events, "
+            "COUNT(DISTINCT bookmaker) AS books, COUNT(DISTINCT sport_key) AS sports, "
+            "COUNT(DISTINCT fetched_at) AS cycles "
+            "FROM odds_snapshots WHERE fetched_at>=?", (since,),
+        ).fetchone()
+        moves = conn.execute(
+            "SELECT COUNT(*) AS n FROM spike_events WHERE detected_at>=?", (since,),
+        ).fetchone()["n"]
+        return {
+            "hours": hours,
+            "lines": row["lines"] or 0,
+            "events": row["events"] or 0,
+            "books": row["books"] or 0,
+            "sports": row["sports"] or 0,
+            "cycles": row["cycles"] or 0,
+            "moves": moves or 0,
+        }
 
 
 def snapshot_meta():

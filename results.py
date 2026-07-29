@@ -19,7 +19,11 @@ not on every poll cycle.
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
-from config import RESULT_CHECK_DELAY_HOURS, RESULTS_CHECK_INTERVAL_HOURS
+from config import (
+    RESULT_CHECK_DELAY_HOURS,
+    RESULTS_CHECK_INTERVAL_HOURS,
+    ODDSPAPI_SPORT_KEYS,
+)
 import odds_client
 import storage
 
@@ -109,6 +113,12 @@ def check_pending_results(now: datetime = None) -> int:
 
     by_sport = defaultdict(list)
     for row in pending:
+        # Esports and table tennis come from OddsPapi; The Odds API scores
+        # endpoint has never heard of those sport keys, so asking it would
+        # error on every cycle and the alerts would never clear. They stay
+        # pending until a results source for that provider is wired in.
+        if row["sport_key"] in ODDSPAPI_SPORT_KEYS:
+            continue
         by_sport[row["sport_key"]].append(row)
 
     scores_by_fixture = {}
@@ -121,6 +131,8 @@ def check_pending_results(now: datetime = None) -> int:
 
     resolved_count = 0
     for row in pending:
+        if row["sport_key"] in ODDSPAPI_SPORT_KEYS:
+            continue
         ev = scores_by_fixture.get(row["fixture_id"])
         if not ev or not ev.get("completed"):
             continue  # not finished yet, or we have no score data for it

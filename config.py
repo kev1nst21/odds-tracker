@@ -157,6 +157,16 @@ PREMATCH_BUFFER_MINUTES = int(os.getenv("PREMATCH_BUFFER_MINUTES", "3"))
 # the model's own error bars.
 MIN_EDGE_PCT = float(os.getenv("MIN_EDGE_PCT", "2.0"))
 
+# Minimum disagreement between bookmakers on an in-play outcome before it
+# counts as a live signal. Live bets are rarer than pre-match ones by design,
+# so this is the one number that decides how many appear at all.
+LIVE_MIN_SPREAD_PCT = float(os.getenv("LIVE_MIN_SPREAD_PCT", "15.0"))
+
+# Sport keys served by OddsPapi rather than The Odds API. Results for these
+# cannot be looked up through The Odds API scores endpoint -- it has never
+# heard of them -- so grading skips them instead of erroring every cycle.
+ODDSPAPI_SPORT_KEYS = {"esports_cs2", "esports_dota2", "esports_lol", "table_tennis"}
+
 # A bookmaker counts as "hasn't moved yet" -- i.e. still worth betting into --
 # only if its price is at least this much above where the books that DID move
 # have settled. Anything tighter is not a real entry, just rounding.
@@ -185,11 +195,15 @@ DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://kev1nst21.github.io/odds-tra
 # without cutting limits.
 FLAT_STAKE = float(os.getenv("FLAT_STAKE", "200"))
 
+# v4 (2026-07-29): second reset. v3 mixed pre-match and live bets into one
+# set of numbers and logged esports alerts that could never be graded (their
+# scores live on a different provider), so the win rate was meaningless.
+# Stats are now split by kind and start clean again.
 # v3 (2026-07-29): clean slate. The earlier database held alerts recorded under
 # the old per-line logic, where the stored "alert price" was whatever the book
 # that spiked was showing -- not the price we would actually have bet at. Those
 # rows can't be re-scored meaningfully, so statistics start fresh from here and
 # every alert now records was-price, dropped-to price and the entry price we
 # recommended.
-DB_PATH = os.path.join(os.path.dirname(__file__), "data", "odds_history_v3.db")
+DB_PATH = os.path.join(os.path.dirname(__file__), "data", "odds_history_v4.db")
 DASHBOARD_PATH = os.path.join(os.path.dirname(__file__), "dashboard", "index.html")

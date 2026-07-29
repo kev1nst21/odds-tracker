@@ -85,7 +85,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   }}
   .hero {{ position: relative; z-index: 1; display: flex; align-items: center; gap: 26px; flex-wrap: wrap; }}
   .mark {{ flex: none; line-height: 0; filter: drop-shadow(0 10px 26px rgba(57,135,229,0.45)); }}
-  .brand-text {{ flex: 1 1 320px; }}
+  .brand-text {{ flex: 1 1 300px; }}
   .brand-text h1 {{
     font-size: clamp(30px, 5vw, 46px); font-weight: 800; letter-spacing: -0.035em;
     margin: 0; line-height: 1.02;
@@ -98,6 +98,11 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .hs b {{ display: block; font-size: 26px; font-weight: 750; letter-spacing: -0.02em; line-height: 1.1; }}
   .hs span {{ font-size: 12.5px; color: var(--muted); }}
   .hs.gold b {{ color: var(--warning); }}
+  .hero-note {{ margin: 16px 0 0; font-size: 13px; color: var(--muted); font-weight: 400; }}
+  h3.sub {{ font-size: 13px; font-weight: 600; color: var(--ink-2); margin: 26px 0 12px;
+    padding-bottom: 8px; border-bottom: 1px solid var(--hairline); }}
+  h3.sub:first-of-type {{ margin-top: 6px; }}
+  h3.sub.live::before {{ content: '🔴 '; }}
   .hs.green b {{ color: var(--good); }}
 
   .status {{ flex: 0 0 250px; }}
@@ -304,7 +309,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   <header class="top">
     <div class="hero">
       <div class="mark" aria-hidden="true">
-        <svg viewBox="0 0 64 64" width="104" height="104" role="img">
+        <svg viewBox="0 0 64 64" width="132" height="132" role="img">
           <defs>
             <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
               <stop offset="0" stop-color="#3987e5"/><stop offset="1" stop-color="#16478a"/>
@@ -335,11 +340,15 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
         <h1>KEWA<span class="sep">·</span>VILKA<span class="sep">·</span>TRACKER</h1>
         <p>Ловим деньги раньше, чем их увидит рынок.</p>
         <div class="hero-stats">
-          <div class="hs"><b>{hero_events}</b><span>событий в работе</span></div>
-          <div class="hs green"><b>{hero_open}</b><span>с открытым входом</span></div>
+          <div class="hs"><b>{cov_books}</b><span>контор в опросе</span></div>
+          <div class="hs"><b>{cov_events}</b><span>событий за 24 ч</span></div>
+          <div class="hs"><b>{cov_lines}</b><span>котировок сверено</span></div>
+          <div class="hs"><b>{cov_moves}</b><span>движений поймано</span></div>
+          <div class="hs green"><b>{hero_open}</b><span>вход открыт сейчас</span></div>
           <div class="hs gold"><b>{hero_stars}</b><span>на три звезды</span></div>
-          <div class="hs"><b>{hero_books}</b><span>контор в опросе</span></div>
         </div>
+        <p class="hero-note">{cov_cycles} срезов рынка за сутки · {cov_sports} лиг и дисциплин ·
+        два независимых поставщика данных · проверка каждые {poll_interval} минут</p>
       </div>
 
       <div class="status">
@@ -401,9 +410,15 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
     <h2>Проверка сигналов</h2>
     <p class="note">Считается по ставкам, чьи матчи уже закончились, и всегда по
     <b>той цене, которую мы называли</b>. <b>CLV</b> — успели ли мы взять цену до того,
-    как её срезал весь рынок. Статистика начата с чистого листа 29.07.2026.</p>
+    как её срезал весь рынок. Предматч и лайв считаются <b>раздельно</b>: это разные
+    стратегии, и смешивать их в одну цифру значит прятать, какая из них работает.
+    Статистика начата с чистого листа 29.07.2026.</p>
+    <h3 class="sub">Предматч — сводка по рынку</h3>
     {stats_card}
     {last_bets}
+    <h3 class="sub live">Лайв — расхождение контор</h3>
+    {stats_live}
+    {last_bets_live}
   </section>
 
   <footer>
@@ -757,6 +772,7 @@ def _last_bets(bets, limit: int = 5) -> str:
 
 def render_dashboard(summaries: list, quota: dict = None, live_rows: list = None):
     meta = storage.snapshot_meta()
+    cov = storage.coverage_stats(24)
     if quota:
         meta["quota_used"] = quota.get("used")
         meta["quota_remaining"] = quota.get("remaining")
@@ -774,14 +790,18 @@ def render_dashboard(summaries: list, quota: dict = None, live_rows: list = None
         freshness_label="в эфире" if fresh else "данные устарели",
         poll_interval=POLL_INTERVAL_MINUTES,
         threshold_pct=f"{SPIKE_THRESHOLD_PCT * 100:.0f}",
-        hero_events=len(summaries or []),
         hero_open=sum(1 for s in (summaries or []) if s.get("has_entry")),
         hero_stars=sum(1 for s in (summaries or []) if s.get("stars", 0) >= 3),
-        hero_books=len(meta.get("bookmakers") or []),
+        cov_books=cov["books"], cov_events=f"{cov['events']:,}".replace(',', ' '),
+        cov_lines=f"{cov['lines']:,}".replace(',', ' '),
+        cov_moves=f"{cov['moves']:,}".replace(',', ' '),
+        cov_cycles=cov["cycles"], cov_sports=cov["sports"],
         summaries_html=_summaries_html(summaries or []),
         live_table=_live_table(live_rows or []),
-        stats_card=_stats_card(storage.alert_stats()),
-        last_bets=_last_bets(storage.recent_bets(5)),
+        stats_card=_stats_card(storage.alert_stats("prematch")),
+        last_bets=_last_bets(storage.recent_bets(5, "prematch")),
+        stats_live=_stats_card(storage.alert_stats("live")),
+        last_bets_live=_last_bets(storage.recent_bets(5, "live")),
         countdown_js=COUNTDOWN_JS,
     )
     # git does not track empty directories, so a fresh CI checkout has no
