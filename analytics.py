@@ -253,6 +253,13 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
             "verdict": _verdict(bet, has_entry),
         })
 
+    # Sub-threshold drift is dropped entirely rather than shown greyed out.
+    # The user's instruction is explicit: "мы не ищем меньше 10%... нам не
+    # обязательно быстро найти, нам главное находить". Showing weak moves
+    # anywhere invites acting on them, so an empty page is the correct output
+    # when the market is quiet.
+    summaries = [s for s in summaries if s["big_move"]]
+
     # Actionable first: a big move you can still get on, then confidence, then
     # how much room is left.
     summaries.sort(key=lambda s: (

@@ -123,3 +123,10 @@ assert all("Ничья" not in r for r in rows), "draw must not appear in any ro
 print("OK: money-flow strategy, draw exclusion, 10% gate, exchange filter all verified.")
 print(f"Verdict: {s['verdict']}")
 print(f"Dashboard: {path}")
+
+# Sub-10% moves must not survive at all -- not in the feed, not anywhere.
+weak = odds_client.flatten_odds([build(2.90)])   # 3.00 -> 2.90 is ~3%
+weak_spikes, weak_moves = detector.detect(weak, (t1 + timedelta(minutes=5)).isoformat())
+weak_summaries = analytics.build_event_summaries(weak, weak_spikes, weak_moves)
+assert weak_summaries == [], f"sub-10% drift must be dropped entirely, got {len(weak_summaries)}"
+print("OK: sub-10% moves dropped entirely.")

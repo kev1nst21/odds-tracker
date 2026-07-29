@@ -46,32 +46,47 @@ CREATE TABLE IF NOT EXISTS spike_events (
 CREATE INDEX IF NOT EXISTS idx_spike_lookup
     ON spike_events (fixture_id, bookmaker, market_id, outcome_id, player_key, direction, detected_at);
 
+-- One row per BET we would have placed, not per line that twitched. The three
+-- prices are the whole point: what the odds were before the money arrived
+-- (old_price), where the books that moved settled (new_price), and what we
+-- actually recommended taking (entry_price, at entry_book). Scoring uses
+-- entry_price, because that is the number a real bet would have got.
 CREATE TABLE IF NOT EXISTS tracked_alerts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    alert_type TEXT NOT NULL,          -- 'spike', 'cascade', or 'digest'
+    alert_type TEXT NOT NULL,
     fixture_id TEXT NOT NULL,
     sport_key TEXT,
     start_time TEXT,
     home_team TEXT,
     away_team TEXT,
-    bookmaker TEXT NOT NULL,
-    market_id TEXT NOT NULL,
-    outcome_id TEXT NOT NULL,
-    player_key TEXT NOT NULL,
+    outcome_id TEXT NOT NULL,          -- 'home' / 'away' -- the side money went into
+    outcome_name TEXT,                 -- team/player name as shown in the alert
+    stars INTEGER,                     -- confidence at the time of the alert
+    down_count INTEGER,                -- how many books had moved
+    books_count INTEGER,
+    old_price REAL,                    -- what the coefficient was before the drop
+    new_price REAL,                    -- what it dropped to at the books that moved
+    entry_price REAL,                  -- what we said to bet at
+    entry_book TEXT,                   -- where that price was
+    market_id TEXT,
+    player_key TEXT,
+    bookmaker TEXT,                    -- kept = entry_book, for the CLV price lookup
     label TEXT,
-    direction TEXT NOT NULL,           -- 'up' or 'down' (odds shortening = 'down' = market favors this outcome more)
-    alert_price REAL,                  -- price at the moment we alerted -- needed for CLV
+    direction TEXT NOT NULL DEFAULT 'down',
+    alert_price REAL,                  -- alias of entry_price, kept for CLV code
     detected_at TEXT NOT NULL,
     resolved INTEGER NOT NULL DEFAULT 0,
     result TEXT,                       -- 'hit', 'miss', or 'n/a' once resolved
-    clv_pct REAL,                      -- (closing_price - alert_price) / alert_price, NULL if not computable
-    clv_continued INTEGER,             -- 1 if the closing line kept moving the same direction as our alert, 0 if it reversed
+    clv_pct REAL,
+    clv_continued INTEGER,
     resolved_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tracked_alerts_lookup
-    ON tracked_alerts (fixture_id, bookmaker, market_id, outcome_id, player_key, resolved);
+    ON tracked_alerts (fixture_id, outcome_id, resolved);
+-- One alert per (event, side): if the same move keeps showing up on later
+-- polls we don't want to log it again and inflate the stats.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tracked_alerts_dedup
-    ON tracked_alerts (alert_type, fixture_id, bookmaker, market_id, outcome_id, player_key);
+    ON tracked_alerts (fixture_id, outcome_id);
 
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
@@ -219,38 +234,55 @@ def count_recent_same_direction_spikes(fixture_id, bookmaker, market_id, outcome
         return row["n"] if row else 0
 
 
-def save_tracked_alert(alert_type: str, r: dict, direction: str, detected_at: str):
-    """Record that we alerted on this line, so we can later check whether the
-    match result (and the closing line) agreed with the move (see results.py).
-    One row per (alert_type, exact line) -- repeat spikes on the same line
-    before it resolves just get ignored, we only need the first alert."""
+def save_bet_alert(summary: dict, detected_at: str) -> bool:
+    """Record the bet an alert actually recommends, so it can be scored later.
+
+    Stores all three prices -- what the coefficient was, what it dropped to,
+    and what we said to take -- because the only honest way to judge the tool
+    is against the price a real bet would have got, not against whichever
+    bookmaker happened to move first. Returns True if a new row was written
+    (the same event/side is only ever logged once).
+    """
+    bet = summary.get("bet") or {}
+    if not bet.get("entry_price"):
+        return False
     with _conn() as conn:
-        conn.execute(
+        cur = conn.execute(
             """
             INSERT OR IGNORE INTO tracked_alerts
                 (alert_type, fixture_id, sport_key, start_time, home_team, away_team,
-                 bookmaker, market_id, outcome_id, player_key, label, direction,
+                 outcome_id, outcome_name, stars, down_count, books_count,
+                 old_price, new_price, entry_price, entry_book,
+                 market_id, player_key, bookmaker, label, direction,
                  alert_price, detected_at, resolved)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'down', ?, ?, 0)
             """,
             (
-                alert_type,
-                r["fixture_id"],
-                r.get("sport_key"),
-                r.get("start_time"),
-                r.get("home_team"),
-                r.get("away_team"),
-                r["bookmaker"],
-                r["market_id"],
-                r["outcome_id"],
-                r["player_key"],
-                r.get("label"),
-                direction,
-                r.get("price"),
+                "bet",
+                summary["fixture_id"],
+                summary.get("sport_key"),
+                summary.get("start_time"),
+                summary.get("home_team"),
+                summary.get("away_team"),
+                bet["side"],
+                bet["name"],
+                summary.get("stars"),
+                bet.get("down_count"),
+                bet.get("books_count"),
+                bet.get("old_price"),
+                bet.get("new_price"),
+                bet.get("entry_price"),
+                bet.get("entry_book"),
+                "h2h",
+                "-",
+                bet.get("entry_book"),
+                bet.get("name"),
+                bet.get("entry_price"),
                 detected_at,
             ),
         )
         conn.commit()
+        return cur.rowcount > 0
 
 
 def get_unresolved_alerts(before_iso: str, limit: int = 200):
@@ -262,8 +294,8 @@ def get_unresolved_alerts(before_iso: str, limit: int = 200):
         rows = conn.execute(
             """
             SELECT id, alert_type, fixture_id, sport_key, start_time, home_team, away_team,
-                   bookmaker, market_id, outcome_id, player_key, label, direction,
-                   alert_price, detected_at
+                   bookmaker, market_id, outcome_id, outcome_name, player_key, label,
+                   direction, alert_price, entry_price, old_price, new_price, detected_at
             FROM tracked_alerts
             WHERE resolved=0 AND start_time IS NOT NULL AND start_time < ?
             ORDER BY start_time ASC LIMIT ?
@@ -311,8 +343,9 @@ def alert_stats():
         ).fetchone()
         recent = conn.execute(
             """
-            SELECT fixture_id, home_team, away_team, bookmaker, label, direction,
-                   alert_type, result, clv_pct, clv_continued, resolved_at
+            SELECT fixture_id, home_team, away_team, outcome_name, stars,
+                   old_price, new_price, entry_price, entry_book,
+                   result, clv_pct, clv_continued, resolved_at
             FROM tracked_alerts WHERE resolved=1
             ORDER BY resolved_at DESC LIMIT 20
             """

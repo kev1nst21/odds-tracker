@@ -54,30 +54,31 @@ def _winner_from_scores(home_score, away_score):
 
 
 def _compute_clv(row):
-    """CLV = (closing_price - alert_price) / alert_price, using the last
-    snapshot we stored before the match's start_time as the 'closing line'.
-    clv_continued: did the closing line keep moving the same direction we
-    alerted on (down => stayed <= alert price; up => stayed >= alert price)?
-    Returns (clv_pct, clv_continued), either possibly None if we don't have
-    enough data (e.g. only ever saw one snapshot for this line)."""
-    if not row["start_time"] or row["alert_price"] is None:
+    """CLV measured against the price WE would have bet at, not against
+    whichever bookmaker moved first.
+
+    We always back a side whose price is falling, so the bet is good if the
+    closing line ended up BELOW our entry: it means we got in before the rest
+    of the market caught up. clv_pct is expressed so that positive = we beat
+    the close.
+
+    Returns (clv_pct, beat_the_close), either possibly None when there isn't
+    enough snapshot history (e.g. the match started before the next poll).
+    """
+    entry = row["entry_price"] if row["entry_price"] is not None else row["alert_price"]
+    if not row["start_time"] or entry is None:
         return None, None
     closing = storage.get_closing_price(
-        row["fixture_id"], row["bookmaker"], row["market_id"], row["outcome_id"], row["player_key"],
-        row["start_time"],
+        row["fixture_id"], row["bookmaker"], row["market_id"], row["outcome_id"],
+        row["player_key"], row["start_time"],
     )
     if not closing:
         return None, None
     _, closing_price = closing
-    alert_price = row["alert_price"]
-    if not closing_price or not alert_price:
+    if not closing_price or not entry:
         return None, None
-    clv_pct = (closing_price - alert_price) / alert_price
-    if row["direction"] == "down":
-        continued = closing_price <= alert_price
-    else:
-        continued = closing_price >= alert_price
-    return clv_pct, continued
+    clv_pct = (entry - closing_price) / closing_price
+    return clv_pct, clv_pct > 0
 
 
 def _warn_sport_error(sport_key, exc):
@@ -128,12 +129,12 @@ def check_pending_results(now: datetime = None) -> int:
         winner = _winner_from_scores(home_score, away_score)
         side = row["outcome_id"]
 
+        # We only ever back the side money went into, so the bet wins exactly
+        # when that side wins. A draw is never bet, so it always loses the bet.
         if winner is None or side not in _VALID_SIDES:
             result = "n/a"
-        elif row["direction"] == "down":
+        else:
             result = "hit" if side == winner else "miss"
-        else:  # direction == "up" -- alert was betting against this side
-            result = "hit" if side != winner else "miss"
 
         clv_pct, clv_continued = _compute_clv(row)
         storage.mark_resolved(row["id"], result, now.isoformat(), clv_pct, clv_continued)

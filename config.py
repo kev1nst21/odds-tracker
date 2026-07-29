@@ -154,5 +154,11 @@ POLL_INTERVAL_MINUTES = int(os.getenv("POLL_INTERVAL_MINUTES", "30"))
 # Public URL of the dashboard, linked at the bottom of each Telegram digest.
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://kev1nst21.github.io/odds-tracker/")
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "data", "odds_history_v2.db")
+# v3 (2026-07-29): clean slate. The earlier database held alerts recorded under
+# the old per-line logic, where the stored "alert price" was whatever the book
+# that spiked was showing -- not the price we would actually have bet at. Those
+# rows can't be re-scored meaningfully, so statistics start fresh from here and
+# every alert now records was-price, dropped-to price and the entry price we
+# recommended.
+DB_PATH = os.path.join(os.path.dirname(__file__), "data", "odds_history_v3.db")
 DASHBOARD_PATH = os.path.join(os.path.dirname(__file__), "dashboard", "index.html")

@@ -106,9 +106,10 @@ def detect(records, fetched_at):
         }
         spikes.append(spike)
         storage.save_spike_event(spike, fetched_at)
-        storage.save_tracked_alert(
-            "cascade" if spike["is_cascade"] else "spike", r, direction, fetched_at
-        )
+        # Tracked alerts are NOT written here any more. This function only sees
+        # one bookmaker at a time, so it cannot know the price we'd actually
+        # bet at -- that needs the whole market. main.py records the bet once
+        # analytics has picked the entry (see storage.save_bet_alert).
 
     spikes.sort(key=lambda s: (not s["is_cascade"], not s["is_sharp_book"], -abs(s["pct_change"])))
     return spikes, movements

@@ -231,10 +231,12 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 
   <div class="card">
     <h2>📊 Проверка сигналов</h2>
-    <p class="note">Считается только по алертам, чьи матчи уже закончились.
-    <b>Win rate</b> — доля угаданных исходов. <b>CLV</b> — насколько цена ушла от нашей
-    точки входа к старту матча; плюс означает, что рынок продолжил двигаться туда же,
-    куда указывал сигнал.</p>
+    <p class="note">Считается только по ставкам, чьи матчи уже закончились, и всегда
+    по <b>той цене, которую мы называли</b>, а не по цене конторы, которая двинулась
+    первой. <b>Win rate</b> — доля зашедших ставок. <b>CLV</b> — успели ли мы взять цену
+    до того, как её срезал весь рынок: плюс значит, что к старту матча коэффициент стал
+    ниже нашего входа, то есть мы обогнали рынок. Статистика начата с чистого листа
+    29.07.2026.</p>
     {stats_card}
   </div>
 
@@ -418,23 +420,27 @@ def _stats_card(stats: dict):
     for r in stats["recent"]:
         result = r["result"]
         cls = "hit" if result == "hit" else ("miss" if result == "miss" else "")
-        result_label = {"hit": "✅ сработал", "miss": "❌ не сработал",
+        result_label = {"hit": "✅ зашла", "miss": "❌ не зашла",
                         "n/a": "н/д"}.get(result, result)
         clv_pct = r["clv_pct"]
         clv_html = f"{clv_pct * 100:+.1f}%" if clv_pct is not None else "—"
         clv_cls = "hit" if r["clv_continued"] == 1 else ("miss" if r["clv_continued"] == 0 else "")
         home, away = r["home_team"], r["away_team"]
         event = f"{home} — {away}" if home and away else str(r["fixture_id"])
-        label = r["label"] or ""
-        if ":" in label:
-            label = label.split(":", 1)[1].strip()
+        old_p = f"{r['old_price']:.2f}" if r["old_price"] else "—"
+        new_p = f"{r['new_price']:.2f}" if r["new_price"] else "—"
+        entry = f"{r['entry_price']:.2f}" if r["entry_price"] else "—"
         rows.append(
-            f"<tr><td><b>{html.escape(event)}</b></td><td>{html.escape(label)}</td>"
-            f"<td class='{cls}'>{result_label}</td><td class='{clv_cls}'>{clv_html}</td>"
-            f"<td class='mono'>{_fmt_dt(r['resolved_at'])}</td></tr>"
+            f"<tr><td class='c-stars'>{'⭐' * (r['stars'] or 0)}</td>"
+            f"<td><b>{html.escape(event)}</b></td>"
+            f"<td>{html.escape(r['outcome_name'] or '')}</td>"
+            f"<td class='mono'>{old_p} → {new_p}</td>"
+            f"<td class='mono'><b>{entry}</b> <small>{html.escape(r['entry_book'] or '')}</small></td>"
+            f"<td class='{cls}'>{result_label}</td><td class='{clv_cls}'>{clv_html}</td></tr>"
         )
-    table = ("<table class='plain'><tr><th>Событие</th><th>Исход</th>"
-             "<th>Результат</th><th>CLV</th><th>Проверено</th></tr>"
+    table = ("<table class='plain'><tr><th></th><th>Событие</th><th>Ставили на</th>"
+             "<th>Был → стал</th><th>Поставили по</th>"
+             "<th>Результат</th><th>CLV</th></tr>"
              + "".join(rows) + "</table>")
     return summary + table
 

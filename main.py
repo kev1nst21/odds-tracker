@@ -33,6 +33,14 @@ def run_once():
     summaries = analytics.build_event_summaries(records, spikes, movements)
 
     storage.save_snapshot(records, fetched_at)
+
+    # Record the bets we're actually recommending, with all three prices, so
+    # results.py can score them later against the price a real bet would have
+    # got. Only alertable ones -- if there's nowhere left to bet, there is no
+    # bet to score.
+    logged = sum(1 for s in summaries
+                 if s.get("alertable") and storage.save_bet_alert(s, fetched_at))
+
     notifier.notify_summaries(summaries, dashboard_url=DASHBOARD_URL)
 
     # Costs quota (one scores call per sport with pending alerts), so this is
@@ -41,13 +49,13 @@ def run_once():
 
     path = dashboard.render_dashboard(summaries, quota=odds_client.LAST_QUOTA)
 
-    with_value = sum(1 for s in summaries if s.get("has_value"))
-    with_move = sum(1 for s in summaries if s.get("has_move"))
+    actionable = sum(1 for s in summaries if s.get("alertable"))
     starred = sum(1 for s in summaries if s.get("stars", 0) >= 3)
     print(
         f"[{fetched_at}] sports={sport_keys} fetched {len(records)} lines, "
-        f"{len(summaries)} events, {with_move} with movement, {with_value} with value, "
-        f"{starred} with 3 stars, {newly_resolved} alerts resolved, dashboard -> {path}"
+        f"{len(summaries)} events moved 10%+, {actionable} with an open entry, "
+        f"{starred} at 3 stars, {logged} new bets logged, "
+        f"{newly_resolved} resolved, dashboard -> {path}"
     )
     return summaries
 
