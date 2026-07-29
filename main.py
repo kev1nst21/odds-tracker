@@ -4,7 +4,13 @@ check results. Run this once per interval (see README.md)."""
 import json
 from datetime import datetime, timedelta, timezone
 
-from config import DASHBOARD_URL, ODDSPAPI_KEY, ODDSPAPI_LOOKUP_TTL_HOURS
+from config import (
+    DASHBOARD_URL,
+    ODDSPAPI_KEY,
+    ODDSPAPI_LOOKUP_TTL_HOURS,
+    POLL_INTERVAL_MINUTES,
+    SNAPSHOT_RETENTION_HOURS,
+)
 import odds_client
 import oddspapi_client
 import storage
@@ -95,7 +101,8 @@ def run_once():
     # got. Only alertable ones -- if there's nowhere left to bet, there is no
     # bet to score.
     logged = sum(1 for s in summaries
-                 if s.get("alertable") and storage.save_bet_alert(s, fetched_at))
+                 if s.get("alertable")
+                 and storage.save_bet_alert(s, fetched_at, POLL_INTERVAL_MINUTES))
 
     notifier.notify_summaries(summaries, dashboard_url=DASHBOARD_URL)
 
@@ -103,16 +110,26 @@ def run_once():
     # internally throttled to run at most once every RESULTS_CHECK_INTERVAL_HOURS.
     newly_resolved = results.check_pending_results()
 
+    # Drop price history we no longer need. At a 3-minute cadence the snapshot
+    # table grows by millions of rows a day; left alone it would eventually make
+    # the CI cache too slow to save, which costs whole runs. Alerts are never
+    # pruned -- they are the track record.
+    pruned = storage.prune_snapshots(SNAPSHOT_RETENTION_HOURS)
+
     path = dashboard.render_dashboard(summaries, quota=odds_client.LAST_QUOTA)
 
     actionable = sum(1 for s in summaries if s.get("alertable"))
     starred = sum(1 for s in summaries if s.get("stars", 0) >= 3)
+    optimal = sum(1 for s in summaries
+                  if s.get("alertable") and s.get("strategy") == "optimal")
     print(
-        f"[{fetched_at}] {len(sport_keys)} sports via TheOddsAPI + "
+        f"[{fetched_at}] every {POLL_INTERVAL_MINUTES} min · "
+        f"{len(sport_keys)} sports via TheOddsAPI + "
         f"{len(esports_records)} esports/table-tennis lines via OddsPapi, "
         f"{len(records)} lines total, {len(summaries)} events moved 10%+, "
-        f"{actionable} with an open entry, {starred} at 3 stars, "
-        f"{logged} new bets logged, {newly_resolved} resolved, dashboard -> {path}"
+        f"{actionable} with an open entry ({optimal} optimal), {starred} at 3 stars, "
+        f"{logged} new bets logged, {newly_resolved} resolved, "
+        f"{pruned} old rows pruned, dashboard -> {path}"
     )
     return summaries
 

@@ -180,11 +180,95 @@ ENTRY_MIN_GAP_PCT = float(os.getenv("ENTRY_MIN_GAP_PCT", "3.0"))
 EXCLUDE_DRAW = os.getenv("EXCLUDE_DRAW", "1") not in ("0", "false", "False")
 
 
-# Purely informational -- how often .github/workflows/poll.yml is scheduled to
-# run. Nothing enforces this in code; it's shown on the dashboard so a reader
-# can tell how fresh the data is and when the next refresh is due. Keep in
-# sync with the cron expression in poll.yml.
-POLL_INTERVAL_MINUTES = int(os.getenv("POLL_INTERVAL_MINUTES", "30"))
+# --- Polling cadence -------------------------------------------------------
+# How often the market is actually snapshotted.
+#
+# 2026-07-29: this stopped being a constant. The cadence now comes from
+# cadence.json -- ONE source of truth read at import time, so runner.py's loop,
+# the Telegram cadence and the countdown on the site are always the same
+# number. They used to be three separate values and they drifted: the site
+# advertised one figure while the code ran another.
+#
+# Why a file of date ranges instead of just editing the cron: GitHub Actions
+# will not schedule anything more often than every 5 minutes, and runs it late
+# routinely. So the workflow fires every 30 minutes and runner.py does its own
+# timed loop inside that window -- the only way to get a real 3-minute cadence
+# out of GitHub. The cron in poll.yml never has to change when the cadence does.
+CADENCE_PATH = os.path.join(os.path.dirname(__file__), "cadence.json")
+
+
+def _load_cadence(at=None):
+    """(minutes, label) for the phase covering `at` (default: now, UTC)."""
+    from datetime import datetime, timezone
+    import json
+
+    at = at or datetime.now(timezone.utc)
+    try:
+        with open(CADENCE_PATH, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except (OSError, ValueError):
+        return 30, ""
+
+    def _dt(value):
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+    for phase in cfg.get("phases", []):
+        try:
+            if _dt(phase["from"]) <= at < _dt(phase["to"]):
+                return int(phase["minutes"]), phase.get("label", "")
+        except (KeyError, ValueError, TypeError):
+            continue
+    return int(cfg.get("default_minutes", 30)), ""
+
+
+# An explicit env var still wins, so a one-off manual run can override the
+# schedule without editing the file.
+_forced = os.getenv("POLL_INTERVAL_MINUTES")
+if _forced:
+    POLL_INTERVAL_MINUTES, CADENCE_LABEL = int(_forced), ""
+else:
+    POLL_INTERVAL_MINUTES, CADENCE_LABEL = _load_cadence()
+
+# How often the GitHub workflow itself fires. The dashboard is a static file
+# republished once per run, so THIS -- not POLL_INTERVAL_MINUTES -- is how
+# often the page changes. Stated separately on the site rather than blurred
+# together, because they are genuinely different numbers: the bot fires on
+# every poll, the page catches up once per run.
+PUBLISH_INTERVAL_MINUTES = int(os.getenv("PUBLISH_INTERVAL_MINUTES", "30"))
+
+# Stop polling inside a run if the provider's monthly credit balance falls
+# below this. A 3-minute cadence burns credits ten times faster than a
+# 30-minute one, and running the account to zero mid-month would take the whole
+# product offline -- much worse than a few missed cycles.
+QUOTA_RESERVE_CREDITS = int(os.getenv("QUOTA_RESERVE_CREDITS", "1500"))
+
+# --- Strategy split (user decision, 2026-07-29) ----------------------------
+# Every signal is logged once and then counted under BOTH headings, so the two
+# win rates are measured on the same events rather than on two different
+# samples:
+#   АГРЕССИВНАЯ -- every signal the tracker fires, whatever the price.
+#   ОПТИМАЛЬНАЯ -- only those whose entry price is at or below this line.
+# The point is to find out empirically whether skipping the long shots
+# actually improves the bottom line, instead of assuming it does.
+OPTIMAL_MAX_PRICE = float(os.getenv("OPTIMAL_MAX_PRICE", "2.8"))
+
+# Above this price the straight bet is treated as risky enough to be worth
+# offering a "безопасный" alternative alongside it (double chance in football,
+# a handicap in tennis) -- see analytics._safe_variant().
+SAFE_TRIGGER_PRICE = float(os.getenv("SAFE_TRIGGER_PRICE", "3.5"))
+
+# The band a safe alternative has to land in to be worth naming. Below the
+# floor you are risking a lot to win very little; above the ceiling it is not
+# meaningfully safer than the straight bet it was supposed to replace.
+SAFE_TARGET_MIN = float(os.getenv("SAFE_TARGET_MIN", "1.7"))
+SAFE_TARGET_MAX = float(os.getenv("SAFE_TARGET_MAX", "2.5"))
+
+# Raw price history is only needed to diff against the previous poll and to
+# find the closing line for CLV; beyond that it is dead weight. At a 3-minute
+# cadence the table grows by roughly 3.5 million rows a day, which would make
+# the CI cache slow to save and eventually impossible. Alerts are never
+# pruned -- they are the actual track record.
+SNAPSHOT_RETENTION_HOURS = int(os.getenv("SNAPSHOT_RETENTION_HOURS", "96"))
 
 # Public URL of the dashboard, linked at the bottom of each Telegram digest.
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://kev1nst21.github.io/odds-tracker/")

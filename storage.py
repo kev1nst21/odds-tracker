@@ -6,13 +6,25 @@ away_team everywhere so alerts and CLV analysis can reference real event
 names and look up scores per sport; added alert_price/clv_pct/clv_continued
 to tracked_alerts for Closing Line Value tracking (see results.py); added a
 small meta key-value table to throttle results-checking without a separate
-state file."""
+state file.
+
+2026-07-29: the database is no longer thrown away when a column is added.
+Four schema versions in one day each wiped the track record, which is the one
+asset this product has -- so new columns now arrive through _migrate() below
+and the history survives. If a change ever genuinely invalidates past rows,
+bump DB_PATH deliberately and say so on the site; don't do it by accident.
+"""
 import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 
-from config import DB_PATH, FLAT_STAKE
+from config import (
+    DB_PATH,
+    FLAT_STAKE,
+    OPTIMAL_MAX_PRICE,
+    SNAPSHOT_RETENTION_HOURS,
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS odds_snapshots (
@@ -108,10 +120,66 @@ def _conn():
         conn.close()
 
 
+# Columns added after the table first shipped. CREATE TABLE IF NOT EXISTS does
+# nothing to an existing table, so without this an older database would keep
+# running with the old shape and every INSERT naming a new column would fail.
+# Additive only -- nothing here can destroy a row.
+_MIGRATIONS = {
+    "tracked_alerts": {
+        # 'aggressive' | 'optimal' -- which strategy bucket this signal falls
+        # into. Stored rather than derived so a later change to the 2.8 cut-off
+        # can't silently rewrite history that was already published.
+        "strategy": "TEXT",
+        # The safer alternative offered alongside a long-shot pick, if one was
+        # computable: what market it is, what to back, and at what price.
+        "safe_market": "TEXT",
+        "safe_pick": "TEXT",
+        "safe_price": "REAL",
+        "safe_book": "TEXT",
+        # Cadence in force when the signal fired. The whole point of the
+        # 3/5/10-minute experiment is to compare buckets, and that is only
+        # possible if each row remembers which bucket it belongs to.
+        "poll_interval_minutes": "INTEGER",
+    },
+}
+
+
+def _migrate(conn):
+    for table, columns in _MIGRATIONS.items():
+        existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if not existing:
+            continue  # table doesn't exist yet; SCHEMA just created it correctly
+        for name, decl in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+
 def init_db():
     with _conn() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         conn.commit()
+
+
+def prune_snapshots(hours: int = None) -> int:
+    """Drop raw price history older than the retention window.
+
+    Snapshots are only needed for two things: diffing against the previous
+    poll, and finding the closing line for CLV once a match is over. Both are
+    satisfied by a few days of history. At a 3-minute cadence the table grows
+    by millions of rows a day, and an oversized database makes the CI cache
+    slow to save -- which would eventually cost us whole runs. Alerts are never
+    touched: they ARE the track record.
+    """
+    hours = SNAPSHOT_RETENTION_HOURS if hours is None else hours
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    with _conn() as conn:
+        deleted = conn.execute(
+            "DELETE FROM odds_snapshots WHERE fetched_at < ?", (cutoff,)
+        ).rowcount
+        conn.execute("DELETE FROM spike_events WHERE detected_at < ?", (cutoff,))
+        conn.commit()
+        return deleted or 0
 
 
 def get_meta(key: str):
@@ -236,7 +304,7 @@ def count_recent_same_direction_spikes(fixture_id, bookmaker, market_id, outcome
         return row["n"] if row else 0
 
 
-def save_bet_alert(summary: dict, detected_at: str) -> bool:
+def save_bet_alert(summary: dict, detected_at: str, poll_interval_minutes: int = None) -> bool:
     """Record the bet an alert actually recommends, so it can be scored later.
 
     Stores all three prices -- what the coefficient was, what it dropped to,
@@ -248,6 +316,7 @@ def save_bet_alert(summary: dict, detected_at: str) -> bool:
     bet = summary.get("bet") or {}
     if not bet.get("entry_price"):
         return False
+    safe = summary.get("safe") or {}
     with _conn() as conn:
         cur = conn.execute(
             """
@@ -256,8 +325,11 @@ def save_bet_alert(summary: dict, detected_at: str) -> bool:
                  outcome_id, outcome_name, stars, down_count, books_count,
                  old_price, new_price, entry_price, entry_book,
                  market_id, player_key, bookmaker, label, direction,
-                 alert_price, detected_at, resolved)
-            VALUES (?, 'prematch', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'down', ?, ?, 0)
+                 alert_price, detected_at, resolved,
+                 strategy, safe_market, safe_pick, safe_price, safe_book,
+                 poll_interval_minutes)
+            VALUES (?, 'prematch', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'down', ?, ?, 0,
+                    ?, ?, ?, ?, ?, ?)
             """,
             (
                 "bet",
@@ -281,6 +353,12 @@ def save_bet_alert(summary: dict, detected_at: str) -> bool:
                 bet.get("name"),
                 bet.get("entry_price"),
                 detected_at,
+                summary.get("strategy"),
+                safe.get("market"),
+                safe.get("pick"),
+                safe.get("price"),
+                safe.get("book"),
+                poll_interval_minutes,
             ),
         )
         conn.commit()
@@ -326,32 +404,58 @@ def mark_resolved(alert_id: int, result: str, resolved_at: str, clv_pct: float =
         conn.commit()
 
 
-def alert_stats(kind: str = "prematch"):
+def _strategy_clause(strategy: str):
+    """SQL fragment + params restricting rows to one strategy bucket.
+
+    'aggressive' is every signal, so it adds nothing. 'optimal' is the subset
+    priced at or below OPTIMAL_MAX_PRICE. The stored column is trusted when
+    present; rows written before the column existed fall back to their entry
+    price, so old history still lands in the right bucket instead of vanishing.
+    """
+    if strategy != "optimal":
+        return "", ()
+    return (
+        " AND (strategy='optimal' OR (strategy IS NULL AND entry_price IS NOT NULL"
+        " AND entry_price<=?))",
+        (OPTIMAL_MAX_PRICE,),
+    )
+
+
+def alert_stats(kind: str = "prematch", strategy: str = "aggressive"):
     """Summary for the dashboard: how many alerts we've fired, how many are
     resolved, the win rate among resolved 1X2-style alerts, and the average
     Closing Line Value -- a more statistically robust "are we beating the
     bookmakers" signal than win/loss alone, since CLV measures whether the
-    market kept moving the way we called it, independent of the final score."""
+    market kept moving the way we called it, independent of the final score.
+
+    strategy: 'aggressive' counts every signal; 'optimal' counts only those at
+    or below OPTIMAL_MAX_PRICE. Both are computed from the SAME logged rows,
+    so the comparison is between two ways of playing one signal stream rather
+    than between two unrelated samples.
+    """
+    sf, sp = _strategy_clause(strategy)
     with _conn() as conn:
-        k = (kind,)
-        total = conn.execute("SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=?", k).fetchone()["n"]
-        resolved = conn.execute("SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=? AND resolved=1", k).fetchone()["n"]
-        hits = conn.execute("SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=? AND result='hit'", k).fetchone()["n"]
-        misses = conn.execute("SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=? AND result='miss'", k).fetchone()["n"]
-        clv_row = conn.execute(
+        k = (kind,) + sp
+
+        def one(sql):
+            return conn.execute(sql, k).fetchone()
+
+        total = one(f"SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=?{sf}")["n"]
+        resolved = one(f"SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=? AND resolved=1{sf}")["n"]
+        hits = one(f"SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=? AND result='hit'{sf}")["n"]
+        misses = one(f"SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=? AND result='miss'{sf}")["n"]
+        clv_row = one(
             "SELECT AVG(clv_pct) AS avg_clv, "
             "SUM(CASE WHEN clv_continued=1 THEN 1 ELSE 0 END) AS clv_wins, "
             "SUM(CASE WHEN clv_continued IS NOT NULL THEN 1 ELSE 0 END) AS clv_n "
-            "FROM tracked_alerts WHERE kind=? AND clv_pct IS NOT NULL", k
-        ).fetchone()
+            f"FROM tracked_alerts WHERE kind=? AND clv_pct IS NOT NULL{sf}"
+        )
         recent = conn.execute(
-            """
-            SELECT fixture_id, home_team, away_team, outcome_name, stars,
-                   old_price, new_price, entry_price, entry_book,
-                   result, clv_pct, clv_continued, resolved_at
-            FROM tracked_alerts WHERE kind=? AND resolved=1
-            ORDER BY resolved_at DESC LIMIT 20
-            """, k
+            "SELECT fixture_id, home_team, away_team, outcome_name, stars, "
+            "       old_price, new_price, entry_price, entry_book, "
+            "       result, clv_pct, clv_continued, resolved_at "
+            f"FROM tracked_alerts WHERE kind=? AND resolved=1{sf} "
+            "ORDER BY resolved_at DESC LIMIT 20", k
         ).fetchall()
         # Flat-stake profit/loss over every graded bet, priced at the entry we
         # actually recommended. A win returns stake x (odds - 1), a loss costs
@@ -359,7 +463,8 @@ def alert_stats(kind: str = "prematch"):
         # pushes -- we don't know what they did.
         graded = conn.execute(
             "SELECT result, entry_price FROM tracked_alerts "
-            "WHERE kind=? AND resolved=1 AND result IN ('hit','miss') AND entry_price IS NOT NULL", k
+            f"WHERE kind=? AND resolved=1 AND result IN ('hit','miss') AND entry_price IS NOT NULL{sf}",
+            k,
         ).fetchall()
         clv_n = clv_row["clv_n"] or 0
         profit = 0.0
@@ -380,6 +485,8 @@ def alert_stats(kind: str = "prematch"):
             "clv_continued_rate": (clv_row["clv_wins"] / clv_n * 100) if clv_n else None,
             "clv_n": clv_n,
             "kind": kind,
+            "strategy": strategy,
+            "max_price": OPTIMAL_MAX_PRICE if strategy == "optimal" else None,
             "stake": FLAT_STAKE,
             "graded_n": len(graded),
             "staked": staked,
@@ -430,33 +537,97 @@ def top_books(limit: int = 10):
         return [{"book": r["book"], "n": r["n"]} for r in rows]
 
 
+def export_ledger(limit: int = 5000):
+    """Every logged signal as plain dicts, oldest first, for publication.
+
+    This is deliberately the raw table with nothing removed or reordered:
+    misses sit next to hits, unresolved rows are included, and the file can be
+    downloaded and recounted by anyone. For an audience that assumes every
+    betting site is fake, an ugly machine-readable file is worth more than any
+    claim made on the page.
+    """
+    with _conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT detected_at, sport_key, start_time, home_team, away_team,
+                   outcome_name, stars, down_count, books_count,
+                   old_price, new_price, entry_price, entry_book,
+                   strategy, safe_market, safe_pick, safe_price,
+                   poll_interval_minutes, resolved, result, clv_pct, resolved_at
+            FROM tracked_alerts WHERE kind='prematch'
+            ORDER BY detected_at ASC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def coverage_stats(hours: int = 24):
     """Honest scale-of-operation numbers for the header.
 
-    Everything here is counted from what actually landed in the database over
-    the window -- no estimates, no multipliers. It reads impressively because
-    the pipeline genuinely does this much work, not because the numbers were
-    dressed up.
+    Everything is counted from what actually landed in the database -- no
+    estimates, no multipliers. Three things were wrong with the first version
+    and are fixed here, because a header full of numbers that don't add up is
+    worse than no header at all:
+
+      * It always said "за 24 ч" even when the database was three hours old,
+        so a freshly-started tracker looked like a dead one. `span_hours` now
+        reports the window that genuinely has data, and the label follows it.
+      * "Движений поймано" counted raw spike rows, so one event moving at six
+        bookmakers read as six movements. It now counts distinct
+        (event, outcome) pairs -- the number of actual market moves, which is
+        also the number a reader assumes it is.
+      * Nothing counted the signals themselves. That is the output of the
+        whole pipeline, so it belongs in the header next to the inputs.
+
+    `books` is deliberately measured over the window rather than over the last
+    poll: bookmaker lists differ per sport, so a single cycle sees fewer books
+    than the tracker actually covers.
     """
-    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    now = datetime.now(timezone.utc)
+    since = (now - timedelta(hours=hours)).isoformat()
     with _conn() as conn:
         row = conn.execute(
             "SELECT COUNT(*) AS lines, COUNT(DISTINCT fixture_id) AS events, "
             "COUNT(DISTINCT bookmaker) AS books, COUNT(DISTINCT sport_key) AS sports, "
-            "COUNT(DISTINCT fetched_at) AS cycles "
+            "COUNT(DISTINCT fetched_at) AS cycles, MIN(fetched_at) AS first_at, "
+            "MAX(fetched_at) AS last_at "
             "FROM odds_snapshots WHERE fetched_at>=?", (since,),
         ).fetchone()
         moves = conn.execute(
-            "SELECT COUNT(*) AS n FROM spike_events WHERE detected_at>=?", (since,),
+            "SELECT COUNT(*) AS n FROM ("
+            "  SELECT DISTINCT fixture_id, outcome_id FROM spike_events"
+            "  WHERE detected_at>=? AND direction='down')", (since,),
         ).fetchone()["n"]
+        signals = conn.execute(
+            "SELECT COUNT(*) AS n FROM tracked_alerts WHERE detected_at>=?", (since,),
+        ).fetchone()["n"]
+
+        # How long we have genuinely been observing, rounded up, capped at the
+        # requested window. Used for the label so it can never overstate.
+        span_hours = hours
+        if row["first_at"]:
+            try:
+                first = datetime.fromisoformat(row["first_at"])
+                if first.tzinfo is None:
+                    first = first.replace(tzinfo=timezone.utc)
+                observed = (now - first).total_seconds() / 3600.0
+                span_hours = max(1, min(hours, int(observed + 0.5)))
+            except ValueError:
+                pass
+
         return {
             "hours": hours,
+            "span_hours": span_hours,
             "lines": row["lines"] or 0,
             "events": row["events"] or 0,
             "books": row["books"] or 0,
             "sports": row["sports"] or 0,
             "cycles": row["cycles"] or 0,
             "moves": moves or 0,
+            "signals": signals or 0,
+            "first_at": row["first_at"],
+            "last_at": row["last_at"],
         }
 
 

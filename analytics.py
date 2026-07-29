@@ -55,6 +55,10 @@ from config import (
     ENTRY_MIN_GAP_PCT,
     EXCLUDE_DRAW,
     SPIKE_THRESHOLD_PCT,
+    OPTIMAL_MAX_PRICE,
+    SAFE_TRIGGER_PRICE,
+    SAFE_TARGET_MIN,
+    SAFE_TARGET_MAX,
 )
 
 _SHARP_PRIORITY = list(ASIAN_SHARP_BOOKMAKERS)
@@ -123,6 +127,106 @@ def _stars(down_books: set, sharp_moved: bool) -> int:
     if sharp_moved:
         stars = min(3, stars + 1)
     return stars
+
+
+# What a safer alternative looks like in sports with no draw. These cannot be
+# computed from the moneyline data we buy -- a handicap is a separate market --
+# so the honest thing is to name the market and hand it to the analyst rather
+# than invent a number. The user's own instruction for tennis was exactly this:
+# "безопасный вариант это фора по геймам... это уже задача аналитика".
+_HANDICAP_HINTS = (
+    ("tennis_", "фора по геймам (обычно −3.5 / +3.5) либо тотал геймов"),
+    ("table_tennis", "фора по очкам"),
+    ("esports_", "фора по картам (−1.5 / +1.5)"),
+)
+
+
+def _handicap_hint(sport_key: str):
+    key = (sport_key or "").lower()
+    for prefix, hint in _HANDICAP_HINTS:
+        if key.startswith(prefix):
+            return hint
+    return None
+
+
+def _safe_variant(bet: dict, by_book: dict, sport_key: str):
+    """A lower-risk way to back the same opinion when the straight price is
+    high (user decision, 2026-07-29: above 3.5 offer a "безопасный" variant
+    landing around 1.7-2.5).
+
+    In football the maths is exact and needs no extra data. Backing "our side
+    OR the draw" is the same as splitting a stake across those two outcomes,
+    and the combined decimal price of doing that is
+
+        1 / (1/pick + 1/draw)
+
+    which is what a bookmaker's own double-chance market is derived from. We
+    take the best such combination available at a single bookmaker, since both
+    legs have to be placed in the same place for the stake split to work.
+    Bookmakers' own 1X markets are usually a little worse than this figure --
+    they add margin on top -- so the number is stated as what the split
+    achieves, not as a price you will see on a screen.
+
+    In two-way sports (tennis, esports, table tennis) there is no draw and
+    therefore no double chance. A handicap is the equivalent, but it lives in a
+    market we don't buy, so the variant returned there is a named instruction
+    rather than a computed price.
+    """
+    if not bet or not bet.get("entry_price"):
+        return None
+    if bet["entry_price"] <= SAFE_TRIGGER_PRICE:
+        return None
+
+    side, name = bet["side"], bet["name"]
+
+    best = None
+    for book, market in by_book.items():
+        pick, draw = market.get(side), market.get("draw")
+        if not pick or not draw or pick <= 1 or draw <= 1:
+            continue
+        price = 1.0 / (1.0 / pick + 1.0 / draw)
+        if best is None or price > best["price"]:
+            best = {"price": price, "book": book, "pick_odds": pick, "draw_odds": draw}
+
+    if best:
+        # Below the floor the alternative stops being worth the trade -- you'd
+        # be risking a lot to win very little -- so it's reported but flagged.
+        in_band = SAFE_TARGET_MIN <= best["price"] <= SAFE_TARGET_MAX
+        return {
+            "market": "double_chance",
+            "pick": f"{name} или ничья",
+            "price": round(best["price"], 2),
+            "book": best["book"],
+            "legs": [(name, round(best["pick_odds"], 2)),
+                     ("Ничья", round(best["draw_odds"], 2))],
+            "in_band": in_band,
+            "note": (
+                f"Двойной шанс собирается на {best['book']}: делим ставку между "
+                f"«{name}» ({best['pick_odds']:.2f}) и ничьей ({best['draw_odds']:.2f}) "
+                f"обратно пропорционально коэффициентам — получается "
+                f"{best['price']:.2f} на то, что мы не проиграем."
+                + ("" if in_band else " Коридор 1.70–2.50 не выдержан, "
+                                       "так что выигрыш здесь скромный.")
+            ),
+        }
+
+    hint = _handicap_hint(sport_key)
+    if hint:
+        return {
+            "market": "handicap",
+            "pick": f"{name} — {hint}",
+            "price": None,
+            "book": None,
+            "legs": [],
+            "in_band": None,
+            "note": (
+                f"Прямой коэффициент {bet['entry_price']:.2f} высокий, а ничьей в этом "
+                f"виде спорта нет, поэтому двойной шанс не собрать. Безопасный вариант — "
+                f"{hint} на «{name}»: этот рынок мы не выкупаем, цену нужно посмотреть "
+                f"в линии и взять что-то в районе 1.70–2.50."
+            ),
+        }
+    return None
 
 
 def build_event_summaries(records: list, spikes: list = None, movements: list = None) -> list:
@@ -231,6 +335,15 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
 
         has_entry = bool(bet and bet["entry_price"])
         stars = bet["stars"] if bet else 0
+
+        # Which strategy bucket this signal falls into. Both buckets are fed by
+        # the same signal stream -- ОПТИМАЛЬНАЯ is simply the subset priced at
+        # or below the cut-off -- so comparing their win rates later actually
+        # answers "is skipping the long shots worth it", rather than comparing
+        # two unrelated sets of bets.
+        strategy = ("optimal" if has_entry and bet["entry_price"] <= OPTIMAL_MAX_PRICE
+                    else "aggressive")
+        safe = _safe_variant(bet, by_book, sample.get("sport_key")) if has_entry else None
         # Only a drop of at least the alert threshold is worth a notification.
         # Sub-threshold drift still shows on the site but must never reach the
         # bot -- the user explicitly does not want small moves pushed to them.
@@ -250,7 +363,9 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
             "big_move": big_enough,
             "alertable": big_enough and has_entry,
             "stars": stars,
-            "verdict": _verdict(bet, has_entry),
+            "strategy": strategy,
+            "safe": safe,
+            "verdict": _verdict(bet, has_entry, safe),
         })
 
     # Sub-threshold drift is dropped entirely rather than shown greyed out.
@@ -271,7 +386,7 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
     return summaries
 
 
-def _verdict(bet, has_entry) -> str:
+def _verdict(bet, has_entry, safe=None) -> str:
     """The conclusion, phrased the way the user actually reasons about the bet:
     'был коэффициент 3, просел до 2.1, желательно проставить за 3'."""
     if not bet:
@@ -306,4 +421,7 @@ def _verdict(bet, has_entry) -> str:
                 else "сигнал средний" if stars == 2
                 else "сигнал слабый, может быть и шум")
     parts.append(f"{breadth} — {strength}.")
+
+    if safe and safe.get("note"):
+        parts.append("Безопасный вариант: " + safe["note"])
     return " ".join(parts)

@@ -18,7 +18,11 @@ from datetime import datetime
 
 import requests
 
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from config import (
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
+    OPTIMAL_MAX_PRICE,
+)
 
 DISCLAIMER = (
     "<i>Это расчёт по движению рынка, а не рекомендация. "
@@ -64,6 +68,23 @@ def _format_event(s: dict) -> str:
         lines.append("")
         lines.append("⛔️ Вход закрыт — просело у всех, старую цену взять негде.")
 
+    # Which strategy bucket this one counts towards, so the two win rates on
+    # the site can be traced back to individual messages here.
+    if s.get("strategy") == "optimal":
+        lines.append(f"\n🟢 <i>Оптимальная — коэффициент не выше {OPTIMAL_MAX_PRICE:g}</i>")
+    else:
+        lines.append("\n🔴 <i>Агрессивная — коэффициент высокий</i>")
+
+    safe = s.get("safe")
+    if safe:
+        lines.append("")
+        if safe.get("price"):
+            lines.append(f"🛡 <b>Безопасный вариант: {html.escape(safe['pick'])} "
+                         f"≈ {safe['price']:.2f}</b>")
+        else:
+            lines.append(f"🛡 <b>Безопасный вариант: {html.escape(safe['pick'])}</b>")
+        lines.append(f"<i>{html.escape(safe.get('note') or '')}</i>")
+
     return "\n".join(lines)
 
 
@@ -94,9 +115,12 @@ def notify_summaries(summaries: list, max_events: int = 6, dashboard_url: str = 
         return
 
     strong = sum(1 for s in actionable if s.get("stars", 0) >= 3)
+    opt = sum(1 for s in actionable if s.get("strategy") == "optimal")
     header = f"⚡ <b>Сигналы — {len(actionable)}</b>"
     if strong:
         header += f"\n⭐⭐⭐ подтверждено рынком: <b>{strong}</b>"
+    if opt:
+        header += f"\n🟢 из них оптимальных (коэф. ≤ {OPTIMAL_MAX_PRICE:g}): <b>{opt}</b>"
 
     body = "\n\n➖➖➖\n\n".join(_format_event(s) for s in actionable[:max_events])
 
