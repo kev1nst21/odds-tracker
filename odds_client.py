@@ -12,7 +12,9 @@ so it won't crash on an unfamiliar shape, but confirm the mapping of
 market/outcome IDs to human-readable labels before trusting alert text.
 """
 import json
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
@@ -24,12 +26,31 @@ class OddsPapiError(RuntimeError):
 
 
 # The free tier throttles hard (confirmed live 2026-07-29: 429 RATE_LIMITED,
-# "Please wait 0.12 seconds before making another request"). We poll ~30
-# bookmakers x several tournament chunks per run, so a fixed pause between
-# every call plus honoring the API's own retryAfter/retryMs on 429 keeps us
-# under the limit instead of failing the whole run on the first throttle hit.
-MIN_REQUEST_INTERVAL_SEC = 0.25
+# "Please wait 0.12 seconds before making another request"). A poll cycle
+# makes on the order of a hundred+ calls (bookmakers x tournament chunks) --
+# run sequentially with a per-call sleep that took several minutes, way past
+# the 5-minute cron interval. _throttle() is a small shared rate gate so
+# many worker threads (see fetch_odds_by_tournaments) can fire concurrently
+# while still respecting one global "no more than ~1 request per
+# MIN_REQUEST_INTERVAL_SEC" ceiling, instead of one thread's sleep blocking
+# nothing but itself.
+MIN_REQUEST_INTERVAL_SEC = 0.15
 MAX_RETRIES = 5
+MAX_WORKERS = 8
+
+_throttle_lock = threading.Lock()
+_next_allowed_time = 0.0
+
+
+def _throttle():
+    global _next_allowed_time
+    with _throttle_lock:
+        now = time.monotonic()
+        wait = _next_allowed_time - now
+        if wait > 0:
+            time.sleep(wait)
+            now += wait
+        _next_allowed_time = now + MIN_REQUEST_INTERVAL_SEC
 
 
 def _get(path: str, params: dict, treat_404_as_empty: bool = False):
@@ -40,6 +61,7 @@ def _get(path: str, params: dict, treat_404_as_empty: bool = False):
     params = {**params, "apiKey": ODDSPAPI_KEY}
 
     for attempt in range(MAX_RETRIES):
+        _throttle()
         resp = requests.get(f"{ODDSPAPI_BASE_URL}{path}", params=params, timeout=20)
         if resp.status_code == 429:
             wait_sec = MIN_REQUEST_INTERVAL_SEC * (attempt + 1)
@@ -52,7 +74,6 @@ def _get(path: str, params: dict, treat_404_as_empty: bool = False):
                 pass
             time.sleep(wait_sec)
             continue
-        time.sleep(MIN_REQUEST_INTERVAL_SEC)
         # Confirmed live (2026-07-29): odds-by-tournaments 404s with
         # FIXTURE_NOT_FOUND whenever a given tournament/bookmaker combo simply
         # has no matches scheduled right now -- completely normal, not an
@@ -93,11 +114,19 @@ def fetch_odds_by_tournaments(tournament_ids: list, bookmakers: list, on_bookmak
     """Fetch current odds for the given tournaments x bookmakers.
 
     The live API rejects >1 bookmaker and >5 tournamentIds per call (confirmed
-    2026-07-29 -- not documented up front), so this loops one request per
+    2026-07-29 -- not documented up front), so this fires one request per
     (bookmaker, <=5 tournamentIds chunk) and merges the raw fixture lists.
     Each fixture in the merged result only carries odds for the single
     bookmaker it was fetched with; flatten_odds() handles that fine since it
     iterates whatever bookmakers are present per fixture.
+
+    A poll cycle is on the order of a hundred+ of these calls (confirmed
+    live 2026-07-29: running them one at a time, even with only a ~0.25s
+    sleep each, took several minutes -- longer than the 5-minute cron
+    interval this is meant to run on). MAX_WORKERS requests run concurrently
+    through a shared ThreadPoolExecutor; _get()'s _throttle() still caps the
+    combined request rate globally, so this doesn't hit the API any harder
+    per second, it just stops one slow round-trip from blocking the next.
 
     A single bad/unsupported bookmaker slug (confirmed live: OddsPapi will
     400 with INVALID_PARAMETER if a bookmaker isn't supported, separate from
@@ -106,15 +135,29 @@ def fetch_odds_by_tournaments(tournament_ids: list, bookmakers: list, on_bookmak
     instead of raising, so one stale entry in ASIAN_SHARP_BOOKMAKERS /
     PUBLIC_BOOKMAKERS doesn't block everything else.
     """
+    jobs = [
+        (bookmaker, chunk)
+        for bookmaker in bookmakers
+        for chunk in _chunk(tournament_ids, 5)
+    ]
+
+    def _fetch_one(bookmaker, chunk):
+        params = {
+            "tournamentIds": ",".join(str(t) for t in chunk),
+            "bookmaker": bookmaker,
+        }
+        return _get("/v4/odds-by-tournaments", params, treat_404_as_empty=True)
+
     all_fixtures = []
-    for bookmaker in bookmakers:
-        for chunk in _chunk(tournament_ids, 5):
-            params = {
-                "tournamentIds": ",".join(str(t) for t in chunk),
-                "bookmaker": bookmaker,
-            }
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        future_to_bookmaker = {
+            pool.submit(_fetch_one, bookmaker, chunk): bookmaker
+            for bookmaker, chunk in jobs
+        }
+        for future in as_completed(future_to_bookmaker):
+            bookmaker = future_to_bookmaker[future]
             try:
-                data = _get("/v4/odds-by-tournaments", params, treat_404_as_empty=True)
+                data = future.result()
             except OddsPapiError as exc:
                 if on_bookmaker_error:
                     on_bookmaker_error(bookmaker, exc)
