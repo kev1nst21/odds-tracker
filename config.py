@@ -12,6 +12,16 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 SPIKE_THRESHOLD_PCT = float(os.getenv("SPIKE_THRESHOLD_PCT", "0.08"))
 
+# "Super alert": two (or more) same-direction spikes on the exact same line
+# within this many minutes get flagged as a cascade -- e.g. price drops 5%,
+# then drops another 5% within half an hour. Usually means the move isn't
+# noise, it's a real developing situation (injury news, lineup leak, etc.).
+CASCADE_WINDOW_MINUTES = int(os.getenv("CASCADE_WINDOW_MINUTES", "30"))
+
+# How long after a match's scheduled start we wait before trying to look up
+# its result and score our alerts against it (matches can run long / start late).
+RESULT_CHECK_DELAY_HOURS = int(os.getenv("RESULT_CHECK_DELAY_HOURS", "3"))
+
 # Sport IDs on OddsPapi -- confirmed live via GET /v4/sports on 2026-07-29
 SPORTS = {
     "football": 10,  # slug: soccer
@@ -36,11 +46,13 @@ ALL_TOURNAMENT_IDS = [tid for ids in TOURNAMENT_IDS.values() for tid in ids]
 # since line moves there tend to reflect informed money rather than public money.
 # Verified against the live OddsPapi bookmaker list on 2026-07-29 -- "crown" isn't
 # a valid slug there, swapped for "maxbet" (IBCBET's rebrand, same Asian handicap desk).
+# "ibcbet" itself also confirmed live (2026-07-29) as no longer a supported slug
+# on OddsPapi -- "maxbet" already covers that same desk, so it's just removed
+# rather than kept around to fail every run.
 ASIAN_SHARP_BOOKMAKERS = [
     "pinnacle",
     "sbobet",
     "singbet",
-    "ibcbet",
     "maxbet",
     "1xbet",
 ]

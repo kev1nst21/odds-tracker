@@ -89,7 +89,7 @@ def _chunk(seq, size):
         yield seq[i:i + size]
 
 
-def fetch_odds_by_tournaments(tournament_ids: list, bookmakers: list) -> list:
+def fetch_odds_by_tournaments(tournament_ids: list, bookmakers: list, on_bookmaker_error=None) -> list:
     """Fetch current odds for the given tournaments x bookmakers.
 
     The live API rejects >1 bookmaker and >5 tournamentIds per call (confirmed
@@ -98,6 +98,13 @@ def fetch_odds_by_tournaments(tournament_ids: list, bookmakers: list) -> list:
     Each fixture in the merged result only carries odds for the single
     bookmaker it was fetched with; flatten_odds() handles that fine since it
     iterates whatever bookmakers are present per fixture.
+
+    A single bad/unsupported bookmaker slug (confirmed live: OddsPapi will
+    400 with INVALID_PARAMETER if a bookmaker isn't supported, separate from
+    the 404-when-no-fixtures case) shouldn't take down the whole poll cycle --
+    that bookmaker's chunk is skipped and reported via on_bookmaker_error
+    instead of raising, so one stale entry in ASIAN_SHARP_BOOKMAKERS /
+    PUBLIC_BOOKMAKERS doesn't block everything else.
     """
     all_fixtures = []
     for bookmaker in bookmakers:
@@ -106,7 +113,12 @@ def fetch_odds_by_tournaments(tournament_ids: list, bookmakers: list) -> list:
                 "tournamentIds": ",".join(str(t) for t in chunk),
                 "bookmaker": bookmaker,
             }
-            data = _get("/v4/odds-by-tournaments", params, treat_404_as_empty=True)
+            try:
+                data = _get("/v4/odds-by-tournaments", params, treat_404_as_empty=True)
+            except OddsPapiError as exc:
+                if on_bookmaker_error:
+                    on_bookmaker_error(bookmaker, exc)
+                continue
             if isinstance(data, list):
                 all_fixtures.extend(data)
     return all_fixtures
