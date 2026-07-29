@@ -260,10 +260,10 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .rail {{
     position: fixed; top: 50%; transform: translateY(-50%); z-index: 0; display: none;
   }}
-  .rail.l {{ left: max(12px, calc(50% - 560px - 210px)); }}
+  .rail.l {{ left: max(10px, calc(50% - 560px - 195px)); }}
   .board {{
     background: var(--surface); border: 1px solid var(--hairline); border-radius: 12px;
-    padding: 12px 13px 9px; width: 186px; box-shadow: 0 10px 28px rgba(0,0,0,0.5);
+    padding: 11px 12px 8px; width: 172px; box-shadow: 0 10px 28px rgba(0,0,0,0.5);
   }}
   .board h4 {{ margin: 0; font-size: 12px; font-weight: 650; letter-spacing: -0.01em; line-height: 1.25; }}
   .board-sub {{ margin: 3px 0 9px; font-size: 11px; color: var(--muted); line-height: 1.3; }}
@@ -296,7 +296,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .sticker.b {{ transform: rotate(2.5deg); border-color: rgba(12,163,12,0.4); }}
   .sticker.c {{ transform: rotate(-1.5deg); border-color: rgba(250,178,25,0.4); }}
   .sticker.d {{ transform: rotate(3deg); border-color: rgba(208,59,59,0.35); }}
-  @media (min-width: 1560px) {{ .rail {{ display: block; }} }}
+  @media (min-width: 1500px) {{ .rail {{ display: block; }} }}
 
   @media (max-width: 640px) {{
     body {{ padding: 20px 14px 56px; }}
