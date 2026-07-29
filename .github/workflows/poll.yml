@@ -1,24 +1,19 @@
-name: Poll odds every 5 minutes
+name: Poll odds every 30 minutes
 
-# IMPORTANT (2026-07-29): the OddsPapi free plan is capped at 250 requests
-# PER MONTH TOTAL (confirmed live via GET /v4/account -- request_limit=250,
-# plan="free"), and one poll cycle here burns roughly (bookmakers x
-# ceil(tournaments/5)) requests -- around 140 with the full bookmaker/
-# tournament list in config.py. We already burned the entire monthly quota
-# just testing this a few times today. Running every 5 minutes on a 250/mo
-# budget is not possible -- that would need well over 100,000 requests/month.
-# Cron is deliberately set to once/day here as a safe default so it does not
-# immediately re-exhaust the quota the moment it resets. Real near-real-time
-# tracking needs either a paid OddsPapi plan (custom pricing) or a much
-# smaller bookmaker/tournament list, or both -- see README.md.
+# 2026-07-29: switched from OddsPapi (free tier hard-capped at 250
+# requests/month total -- nowhere near enough) to The Odds API's paid "20K"
+# plan (20,000 credits/month, $30/mo, all bookmakers included). Quota math
+# (see README.md "Квота" section): odds-polling every 30 min x ~9 sport keys
+# x 1 credit/call =~ 13,000 credits/mo, + results/CLV checking (throttled to
+# once every RESULTS_CHECK_INTERVAL_HOURS inside results.py itself) =~ 2,200
+# credits/mo -- leaves headroom under the 20K/mo budget.
 on:
   schedule:
-    - cron: "0 9 * * *"  # once a day at 09:00 UTC -- see note above
+    - cron: "*/30 * * * *"
   workflow_dispatch: {}
 
-# If a run somehow takes longer than the schedule interval (should not happen
-# now that fetches run concurrently, see odds_client.py), do not let runs pile
-# up on top of each other -- newest scheduled run wins.
+# If a run somehow takes longer than the 30-minute schedule, don't let runs
+# pile up on top of each other -- newest scheduled run wins.
 concurrency:
   group: poll-odds
   cancel-in-progress: true
@@ -26,7 +21,7 @@ concurrency:
 jobs:
   poll:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
 
@@ -37,9 +32,9 @@ jobs:
       # actions/cache silently skips the save step if the exact key already
       # exists -- with a fixed key that means the DB would only ever get
       # saved once, and every run after that would "restore" the same stale
-      # snapshot forever (spike detection needs the previous run price data,
-      # so this matters). Keying on the run id makes every run save unique;
-      # restore-keys falls back to the most recent previous run cache.
+      # snapshot forever (spike detection needs the previous run's prices,
+      # so this matters). Keying on the run id makes every run's save unique;
+      # restore-keys falls back to the most recent previous run's cache.
       - name: Restore odds history DB
         uses: actions/cache@v4
         with:
@@ -51,8 +46,9 @@ jobs:
 
       - name: Run one poll cycle
         env:
-          ODDSPAPI_KEY: ${{ secrets.ODDSPAPI_KEY }}
+          THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SPIKE_THRESHOLD_PCT: "0.08"
+          RESULTS_CHECK_INTERVAL_HOURS: "3"
         run: python main.py
