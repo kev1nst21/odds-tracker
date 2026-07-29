@@ -139,7 +139,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
     {snapshot_table}
   </div>
 
-  <footer>ODDS-TRACKER · Pinnacle / SBOBET / IBCBET / Maxbet / 1xBet и др. · auto-refresh every poll cycle</footer>
+  <footer>ODDS-TRACKER · The Odds API · Pinnacle / 1xBet (шарп) + паблик-конторы · auto-refresh every poll cycle</footer>
 </div>
 </body>
 </html>
@@ -149,6 +149,15 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 def _region_badge(bookmaker: str) -> str:
     label = REGION_LABELS.get(get_region(bookmaker), "")
     return f"<span class='region-tag'>{html.escape(label)}</span>" if label else ""
+
+
+def _event_name(row_like) -> str:
+    home = row_like.get("home_team") if isinstance(row_like, dict) else row_like["home_team"]
+    away = row_like.get("away_team") if isinstance(row_like, dict) else row_like["away_team"]
+    if home and away:
+        return f"{home} vs {away}"
+    fid = row_like.get("fixture_id") if isinstance(row_like, dict) else row_like["fixture_id"]
+    return str(fid)
 
 
 def _spikes_table(spikes):
@@ -165,13 +174,13 @@ def _spikes_table(spikes):
         )
         rows.append(
             f"<tr class='{row_cls}'><td class='{cls}'>{cascade_mark}{html.escape(s['bookmaker'])}{_region_badge(s['bookmaker'])}</td>"
-            f"<td>{html.escape(str(s['fixture_id']))}</td>"
+            f"<td><b>{html.escape(_event_name(s))}</b></td>"
             f"<td>{html.escape(line_label)}</td>"
             f"<td>{s['prev_price']:.2f} → {s['price']:.2f}</td>"
             f"<td class='{direction_cls}'>{s['pct_change'] * 100:+.1f}%</td></tr>"
         )
     return (
-        "<table><tr><th>Bookmaker</th><th>Fixture</th><th>Line</th>"
+        "<table><tr><th>Bookmaker</th><th>Событие</th><th>Line</th>"
         "<th>Odds</th><th>Change</th></tr>" + "".join(rows) + "</table>"
     )
 
@@ -179,6 +188,10 @@ def _spikes_table(spikes):
 def _stats_card(stats: dict):
     win_rate = stats["win_rate"]
     win_rate_html = f"{win_rate:.0f}%" if win_rate is not None else "—"
+    avg_clv = stats.get("avg_clv_pct")
+    avg_clv_html = f"{avg_clv * 100:+.1f}%" if avg_clv is not None else "—"
+    clv_rate = stats.get("clv_continued_rate")
+    clv_rate_html = f"{clv_rate:.0f}%" if clv_rate is not None else "—"
     summary = f"""
     <div class="stat-row">
       <div class="stat"><b>{stats['total']}</b>алертов всего</div>
@@ -186,21 +199,29 @@ def _stats_card(stats: dict):
       <div class="stat"><b>{stats['pending']}</b>ждут завершения матча</div>
       <div class="stat"><b>{win_rate_html}</b>win rate (по 1X2-рынкам)</div>
     </div>
+    <div class="stat-row">
+      <div class="stat"><b>{avg_clv_html}</b>средний CLV (closing line value)</div>
+      <div class="stat"><b>{clv_rate_html}</b>линия продолжила движение в нашу сторону ({stats.get('clv_n') or 0} с данными)</div>
+    </div>
     """
     if not stats["recent"]:
         return summary + '<p class="empty">Пока нет проверенных алертов -- появятся, как только завершится первый отслеживаемый матч.</p>'
     rows = []
-    for fixture_id, bookmaker, label, direction, alert_type, result, resolved_at in stats["recent"]:
+    for r in stats["recent"]:
+        result = r["result"]
         cls = "hit" if result == "hit" else ("miss" if result == "miss" else "")
         result_label = {"hit": "✅ сработал", "miss": "❌ не сработал", "n/a": "н/д (не 1X2)"}.get(result, result)
+        clv_pct = r["clv_pct"]
+        clv_html = f"{clv_pct * 100:+.1f}%" if clv_pct is not None else "—"
+        clv_cls = "hit" if r["clv_continued"] == 1 else ("miss" if r["clv_continued"] == 0 else "")
         rows.append(
-            f"<tr><td>{html.escape(str(fixture_id))}</td><td>{html.escape(bookmaker)}</td>"
-            f"<td>{html.escape(label or '')}</td><td>{html.escape(alert_type)}</td>"
-            f"<td class='{cls}'>{result_label}</td></tr>"
+            f"<tr><td><b>{html.escape(_event_name(r))}</b></td><td>{html.escape(r['bookmaker'])}</td>"
+            f"<td>{html.escape(r['label'] or '')}</td><td>{html.escape(r['alert_type'])}</td>"
+            f"<td class='{cls}'>{result_label}</td><td class='{clv_cls}'>{clv_html}</td></tr>"
         )
     table = (
-        "<table><tr><th>Fixture</th><th>Bookmaker</th><th>Line</th>"
-        "<th>Type</th><th>Result</th></tr>" + "".join(rows) + "</table>"
+        "<table><tr><th>Событие</th><th>Bookmaker</th><th>Line</th>"
+        "<th>Type</th><th>Result</th><th>CLV</th></tr>" + "".join(rows) + "</table>"
     )
     return summary + table
 
@@ -212,13 +233,13 @@ def _region_table(rows):
     for d in rows:
         cls = "up" if d["divergence_pct"] > 0 else "down"
         out.append(
-            f"<tr><td>{html.escape(str(d['fixture_id']))}</td><td>{html.escape(d['label'])}</td>"
+            f"<tr><td><b>{html.escape(_event_name(d))}</b></td><td>{html.escape(d['label'])}</td>"
             f"<td>{d['asia_avg']:.2f} ({html.escape(', '.join(d['asia_books']))})</td>"
             f"<td>{d['europe_avg']:.2f} ({html.escape(', '.join(d['europe_books']))})</td>"
             f"<td class='{cls}'>{d['divergence_pct'] * 100:+.1f}%</td></tr>"
         )
     return (
-        "<table><tr><th>Fixture</th><th>Line</th><th>🌏 Азия avg</th>"
+        "<table><tr><th>Событие</th><th>Line</th><th>🌏 Азия avg</th>"
         "<th>🇪🇺 Европа avg</th><th>Gap</th></tr>" + "".join(out) + "</table>"
     )
 
@@ -230,13 +251,13 @@ def _digest_table(divergences):
     for d in divergences:
         cls = "up" if d["divergence_pct"] > 0 else "down"
         rows.append(
-            f"<tr><td>{html.escape(str(d['fixture_id']))}</td><td>{html.escape(d['label'])}</td>"
+            f"<tr><td><b>{html.escape(_event_name(d))}</b></td><td>{html.escape(d['label'])}</td>"
             f"<td>{d['sharp_avg']:.2f} ({html.escape(', '.join(d['sharp_books']))})</td>"
             f"<td>{d['public_avg']:.2f} ({html.escape(', '.join(d['public_books']))})</td>"
             f"<td class='{cls}'>{d['divergence_pct'] * 100:+.1f}%</td></tr>"
         )
     return (
-        "<table><tr><th>Fixture</th><th>Line</th><th>Sharp avg</th>"
+        "<table><tr><th>Событие</th><th>Line</th><th>Sharp avg</th>"
         "<th>Public avg</th><th>Gap</th></tr>" + "".join(rows) + "</table>"
     )
 
@@ -245,15 +266,17 @@ def _snapshot_table(rows):
     if not rows:
         return '<p class="empty">Нет данных — запусти первый poll.</p>'
     out = []
-    for fetched_at, fixture_id, bookmaker, market_id, outcome_id, player_key, price, label in rows:
+    for row in rows:
+        fetched_at, bookmaker = row["fetched_at"], row["bookmaker"]
+        market_id, outcome_id, price, label = row["market_id"], row["outcome_id"], row["price"], row["label"]
         cls = "sharp" if bookmaker.lower() in ASIAN_SHARP_BOOKMAKERS else ""
         out.append(
             f"<tr><td>{html.escape(fetched_at)}</td><td class='{cls}'>{html.escape(bookmaker)}{_region_badge(bookmaker)}</td>"
-            f"<td>{html.escape(str(fixture_id))}</td><td>{html.escape(label or f'{market_id}/{outcome_id}')}</td>"
+            f"<td><b>{html.escape(_event_name(row))}</b></td><td>{html.escape(label or f'{market_id}/{outcome_id}')}</td>"
             f"<td>{price:.2f}</td></tr>"
         )
     return (
-        "<table><tr><th>Fetched</th><th>Bookmaker</th><th>Fixture</th>"
+        "<table><tr><th>Fetched</th><th>Bookmaker</th><th>Событие</th>"
         "<th>Line</th><th>Price</th></tr>" + "".join(out) + "</table>"
     )
 

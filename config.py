@@ -1,11 +1,21 @@
-"""Central configuration for the odds-movement tracker."""
+"""Central configuration for the odds-movement tracker.
+
+Provider: The Odds API (the-odds-api.com), switched from OddsPapi on 2026-07-29
+after OddsPapi's free plan turned out to be capped at 250 requests/month total
+(confirmed live via GET /v4/account) -- nowhere near enough for real polling.
+The Odds API bills differently: 1 request = 1 sport key, and returns EVERY
+bookmaker for that sport in a single call, so cost = markets x regions per
+call instead of 1-bookmaker-per-call. Confirmed live 2026-07-29 that the paid
+$30/mo "20K" tier includes "All bookmakers" (Pinnacle and 1xBet included) --
+bookmaker access is NOT gated by plan tier, only the monthly credit total is.
+"""
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
-ODDSPAPI_KEY = os.getenv("ODDSPAPI_KEY", "")
-ODDSPAPI_BASE_URL = "https://api.oddspapi.io"
+THEODDSAPI_KEY = os.getenv("THEODDSAPI_KEY", "")
+THEODDSAPI_BASE_URL = "https://api.the-odds-api.com"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -22,62 +32,69 @@ CASCADE_WINDOW_MINUTES = int(os.getenv("CASCADE_WINDOW_MINUTES", "30"))
 # its result and score our alerts against it (matches can run long / start late).
 RESULT_CHECK_DELAY_HOURS = int(os.getenv("RESULT_CHECK_DELAY_HOURS", "3"))
 
-# Sport IDs on OddsPapi -- confirmed live via GET /v4/sports on 2026-07-29
-SPORTS = {
-    "football": 10,  # slug: soccer
-    "tennis": 12,
-    "cs2": 17,       # slug: esport-counter-strike
-    "lol": 18,       # slug: esport-league-of-legends
-    "dota2": 16,     # slug: esport-dota
-}
+# GET /v4/sports/{sport}/scores/ costs quota too (1-2 credits per sport per
+# call), so results.py doesn't check on every single poll cycle -- only once
+# per this many hours (tracked via storage's meta table). Keeps the
+# quota budget dominated by the odds-polling cadence, not results-checking.
+RESULTS_CHECK_INTERVAL_HOURS = int(os.getenv("RESULTS_CHECK_INTERVAL_HOURS", "3"))
 
-# Tournament IDs -- pulled live from GET /v4/tournaments?sportId=... on 2026-07-29.
-# Extend/trim freely; run odds_client.list_tournaments(SPORTS["<sport>"]) to see more.
-TOURNAMENT_IDS = {
-    "football": [17, 8, 23, 35, 34, 7],       # Premier League, La Liga, Serie A, Bundesliga, Ligue 1, Champions League
-    "tennis": [591, 2567, 2579, 2100],        # Wimbledon, Australian Open (MS), French Open (MS), Davis Cup
-    "cs2": [2392, 2414, 16634],               # ESL Pro League, IEM, PGL Major
-    "lol": [2450, 2452, 2454, 15490, 2549],   # LCS, LEC, LCK, LPL, Worlds
-    "dota2": [13911, 24405, 28029],           # The International, ESL One Birmingham, PGL Bucharest Major
-}
-ALL_TOURNAMENT_IDS = [tid for ids in TOURNAMENT_IDS.values() for tid in ids]
+# Region parameter for The Odds API -- determines which bookmakers come back.
+# Confirmed live (2026-07-29) via the bookmakers-by-region page: Pinnacle and
+# 1xBet (our two Asian/sharp reference books) both live under the "eu" region
+# key on this API. SBOBET, Singbet and Maxbet (available on OddsPapi) are NOT
+# covered by The Odds API at all -- a real coverage loss, but Pinnacle is
+# still the single most important sharp reference book, so this is an
+# acceptable trade for going from a 250/month quota to a usable one.
+REGIONS = os.getenv("THEODDSAPI_REGIONS", "eu")
+
+# h2h = moneyline/1X2. Extra markets (spreads, totals) each multiply the
+# per-call quota cost by the number of regions -- keep to h2h only to stay
+# inside the $30/mo "20K credits" plan at a reasonable polling frequency.
+# See README.md for the quota math.
+MARKETS = os.getenv("THEODDSAPI_MARKETS", "h2h")
+
+# Soccer leagues to track, matched by exact sport key from GET /v4/sports.
+# NOTE: The Odds API's esports coverage is confirmed live (2026-07-29, full
+# GET /v4/sports listing) to be NON-EXISTENT -- no CS2, League of Legends or
+# Dota 2 keys anywhere. That's a real scope cut vs. the original OddsPapi
+# setup; cybersport tracking is not possible on this provider. Documented
+# here as a known gap, not a TODO -- there's no fix short of adding a second,
+# esports-specific provider on top of this one.
+SOCCER_LEAGUE_KEYS = [
+    "soccer_epl",
+    "soccer_spain_la_liga",
+    "soccer_italy_serie_a",
+    "soccer_germany_bundesliga",
+    "soccer_france_ligue_one",
+    "soccer_uefa_champs_league",
+    "soccer_uefa_champs_league_qualification",
+]
+
+# Tennis has no single stable "ATP tour" key -- confirmed live (2026-07-29)
+# that /v4/sports only lists whichever tournament is currently in season
+# (e.g. "tennis_atp_washington_open" in July). main.py fetches the live
+# /v4/sports list each run (that call is free, no quota cost) and includes
+# every sport whose group is "Tennis" rather than hardcoding a tournament key
+# that would go stale the moment the tournament ends.
+TENNIS_GROUP = "Tennis"
 
 # Asian / sharp bookmakers get checked first and weighted higher in alerts,
-# since line moves there tend to reflect informed money rather than public money.
-# Verified against the live OddsPapi bookmaker list on 2026-07-29 -- "crown" isn't
-# a valid slug there, swapped for "maxbet" (IBCBET's rebrand, same Asian handicap desk).
-# "ibcbet" itself also confirmed live (2026-07-29) as no longer a supported slug
-# on OddsPapi -- "maxbet" already covers that same desk, so it's just removed
-# rather than kept around to fail every run.
+# since line moves there tend to reflect informed money rather than public
+# money. Bookmaker keys per The Odds API's own naming (confirmed live
+# 2026-07-29): Pinnacle is "pinnacle", 1xBet is "onexbet".
 ASIAN_SHARP_BOOKMAKERS = [
     "pinnacle",
-    "sbobet",
-    "singbet",
-    "maxbet",
-    "1xbet",
+    "onexbet",
 ]
-
-# Softer / recreational books, tracked for comparison against the sharp side.
-# All confirmed valid slugs on OddsPapi's own bookmaker list (2026-07-29) --
-# one paid-free API key already covers all of these, no extra accounts needed.
-PUBLIC_BOOKMAKERS = [
-    "bet365", "williamhill", "unibet", "bwin", "betfair-ex", "betway",
-    "ladbrokes", "coral", "betvictor", "sportingbet", "888sport",
-    "betfred", "paddypower", "skybet", "tipico", "interwetten",
-    "betsson", "marathonbet", "stake", "draftkings", "fanduel",
-    "betmgm", "caesars", "dafabet",
-]
-
-ALL_BOOKMAKERS = ASIAN_SHARP_BOOKMAKERS + PUBLIC_BOOKMAKERS
 
 # Purely geographic split -- separate axis from "sharp vs public" above.
-# Sharp/public groups by how informed the money is; this groups by where the
-# bookmaker's core market actually is, so the dashboard can show a clean
-# "Asia vs Europe" view on request. Bookmakers not listed default to "europe".
+# Bookmakers not listed default to "europe" (see get_region()).
 BOOKMAKER_REGIONS = {
-    "pinnacle": "asia", "sbobet": "asia", "singbet": "asia", "ibcbet": "asia",
-    "maxbet": "asia", "1xbet": "asia", "dafabet": "asia",
-    "stake": "us", "draftkings": "us", "fanduel": "us", "betmgm": "us", "caesars": "us",
+    "pinnacle": "asia",
+    "onexbet": "asia",
+    "betonlineag": "us", "betmgm": "us", "betrivers": "us", "betus": "us",
+    "bovada": "us", "williamhill_us": "us", "draftkings": "us", "fanatics": "us",
+    "fanduel": "us", "lowvig": "us", "mybookieag": "us",
 }
 REGION_LABELS = {"asia": "🌏 Азия", "europe": "🇪🇺 Европа", "us": "🇺🇸 США"}
 
@@ -86,5 +103,5 @@ def get_region(bookmaker: str) -> str:
     return BOOKMAKER_REGIONS.get(bookmaker.lower(), "europe")
 
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "data", "odds_history.db")
+DB_PATH = os.path.join(os.path.dirname(__file__), "data", "odds_history_v2.db")
 DASHBOARD_PATH = os.path.join(os.path.dirname(__file__), "dashboard", "index.html")

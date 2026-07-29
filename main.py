@@ -1,8 +1,8 @@
-"""Single poll cycle: fetch odds -> store snapshot -> detect spikes -> notify -> update dashboard.
+"""Single poll cycle: discover sports -> fetch odds -> store snapshot ->
+detect spikes -> notify -> update dashboard -> (periodically) check results.
 Run this once per interval (see README.md for how to schedule it)."""
 from datetime import datetime, timezone
 
-from config import SPORTS, ALL_BOOKMAKERS, ALL_TOURNAMENT_IDS
 import odds_client
 import storage
 import detector
@@ -12,19 +12,20 @@ import dashboard
 import results
 
 
-def _warn_bookmaker_error(bookmaker, exc):
-    # A single unsupported/renamed bookmaker slug shouldn't crash the whole
-    # run -- log it and keep going with everyone else.
-    print(f"[main] skipping bookmaker '{bookmaker}': {exc}")
+def _warn_sport_error(sport_key, exc):
+    # A single sport temporarily failing (e.g. no events right now) shouldn't
+    # crash the whole run -- log it and keep going with everyone else.
+    print(f"[main] skipping sport '{sport_key}': {exc}")
 
 
-def run_once(tournament_ids: list):
+def run_once():
     storage.init_db()
     fetched_at = datetime.now(timezone.utc).isoformat()
 
-    raw = odds_client.fetch_odds_by_tournaments(
-        tournament_ids, ALL_BOOKMAKERS, on_bookmaker_error=_warn_bookmaker_error
-    )
+    all_sports = odds_client.list_sports()  # free call, no quota cost
+    sport_keys = odds_client.select_sport_keys(all_sports)
+
+    raw = odds_client.fetch_odds_for_sports(sport_keys, on_error=_warn_sport_error)
     records = odds_client.flatten_odds(raw)
 
     spikes = detector.detect_spikes(records, fetched_at)
@@ -36,12 +37,14 @@ def run_once(tournament_ids: list):
     notifier.notify_digest(divergences)
     notifier.notify_region_digest(region_rows)
 
+    # Costs quota (scores call per sport with pending alerts), so this is
+    # internally throttled to run at most once every RESULTS_CHECK_INTERVAL_HOURS.
     newly_resolved = results.check_pending_results()
 
     path = dashboard.render_dashboard(spikes, divergences, region_rows)
 
     print(
-        f"[{fetched_at}] fetched {len(records)} lines across {len(ALL_BOOKMAKERS)} bookmakers, "
+        f"[{fetched_at}] sports={sport_keys} fetched {len(records)} lines, "
         f"{len(spikes)} spikes, {len(divergences)} sharp/public divergences, "
         f"{len(region_rows)} Asia/Europe divergences, {newly_resolved} alerts resolved, "
         f"dashboard -> {path}"
@@ -50,4 +53,4 @@ def run_once(tournament_ids: list):
 
 
 if __name__ == "__main__":
-    run_once(ALL_TOURNAMENT_IDS)
+    run_once()

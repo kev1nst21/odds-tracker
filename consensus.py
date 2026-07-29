@@ -34,11 +34,14 @@ def sharp_vs_public(records: list) -> list:
         divergence = (sharp_avg - public_avg) / public_avg
         if abs(divergence) < DIVERGENCE_THRESHOLD_PCT:
             continue
+        sample = g["sharp"][0]
         rows.append({
             "fixture_id": fixture_id,
             "market_id": market_id,
             "outcome_id": outcome_id,
-            "label": g["sharp"][0].get("label") or f"{market_id}/{outcome_id}",
+            "home_team": sample.get("home_team"),
+            "away_team": sample.get("away_team"),
+            "label": sample.get("label") or f"{market_id}/{outcome_id}",
             "sharp_avg": sharp_avg,
             "public_avg": public_avg,
             "divergence_pct": divergence,
@@ -72,11 +75,14 @@ def region_breakdown(records: list) -> list:
         divergence = (asia_avg - europe_avg) / europe_avg
         if abs(divergence) < REGION_DIVERGENCE_THRESHOLD_PCT:
             continue
+        sample = asia[0]
         rows.append({
             "fixture_id": fixture_id,
             "market_id": market_id,
             "outcome_id": outcome_id,
-            "label": asia[0].get("label") or f"{market_id}/{outcome_id}",
+            "home_team": sample.get("home_team"),
+            "away_team": sample.get("away_team"),
+            "label": sample.get("label") or f"{market_id}/{outcome_id}",
             "asia_avg": asia_avg,
             "europe_avg": europe_avg,
             "divergence_pct": divergence,
