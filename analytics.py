@@ -195,7 +195,11 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
         # what stops one outlier book from defining the event's direction.
         shortening = [o for o in outcomes if o["down_count"] > 0]
         if shortening:
-            lead = max(shortening, key=lambda o: (o["down_count"], -(o["avg_down_pct"] or 0)))
+            # Prefer an outcome that actually crossed the alert threshold, then
+            # the one most bookmakers agree on, then the biggest drop. Without
+            # the first key the headline can land on a 1.6% drift while the
+            # outcome that genuinely spiked goes unmentioned.
+            lead = max(shortening, key=lambda o: (o["spiked"], o["down_count"], -(o["avg_down_pct"] or 0)))
             movement = {
                 "name": lead["name"],
                 "pct": lead["avg_down_pct"] or 0.0,
@@ -213,7 +217,10 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
         value.sort(key=lambda o: -o["edge_pct"])
         best_value = value[0] if value else None
 
-        stars = max((o["stars"] for o in outcomes), default=0)
+        # The badge must describe the move the verdict actually talks about, so
+        # take the lead outcome's score rather than the best score anywhere on
+        # the event.
+        stars = movement["stars"] if movement else 0
         # Only report an event as "moving" once at least one book crossed the
         # alert threshold -- broad sub-threshold drift still sets the stars and
         # the direction, but on its own it isn't news.
@@ -255,23 +262,29 @@ def _verdict(movement, best_value, outcomes) -> str:
     if movement:
         books = movement.get("books", 0)
         total = movement.get("total_books", 0)
+        stars = movement.get("stars", 0)
         parts.append(
             f"Линия просела на «{movement['name']}» у {books} из {total} контор "
             f"(в среднем {abs(movement['pct']):.1f}%)"
             + (", включая шарпов" if movement.get("sharp") else "") + "."
         )
-        # Wording keyed to the actual book count, not to the star total -- the
-        # sharp bonus can push a single-book move to 2 stars, and saying
-        # "несколько контор" over "1 из 18" would read as a bug.
-        if books >= 4:
-            parts.append("Движение подтверждено по всему рынку — сигнал сильный.")
-        elif books >= 2:
-            parts.append("Движение подтвердили несколько контор — сигнал средний.")
-        elif movement.get("sharp"):
-            parts.append("Просело пока только у шарп-конторы — она часто идёт первой, "
-                         "но подтверждения рынком ещё нет.")
-        else:
-            parts.append("Просело только у одной конторы — пока это может быть и шум.")
+        # The factual count above and the strength label below must never
+        # disagree, so the label is driven by the same star score shown on the
+        # card -- previously the count decided the wording and the stars were
+        # computed separately, which produced "3 из 13 ... сигнал средний" on
+        # an event badged three stars.
+        breadth = (
+            "Движение подтверждено по всему рынку" if books >= 4
+            else "Движение подтвердили несколько контор" if books >= 2
+            else "Просело пока только у шарп-конторы, а она обычно идёт первой" if movement.get("sharp")
+            else "Просело только у одной конторы"
+        )
+        strength = (
+            "сигнал сильный" if stars >= 3
+            else "сигнал средний" if stars == 2
+            else "сигнал слабый, может быть и шум"
+        )
+        parts.append(f"{breadth} — {strength}.")
 
     if best_value:
         parts.append(
