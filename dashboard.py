@@ -1,6 +1,7 @@
 """Renders a self-contained HTML dashboard: latest odds snapshot + recent spikes.
 Overwrites dashboard/index.html on every run so it always reflects the last poll."""
 import html
+import os
 from datetime import datetime, timezone
 
 from config import DASHBOARD_PATH, ASIAN_SHARP_BOOKMAKERS, REGION_LABELS, get_region
@@ -268,6 +269,10 @@ def render_dashboard(spikes: list, divergences: list = None, region_rows: list =
         snapshot_table=_snapshot_table(rows),
         n=snapshot_limit,
     )
+    # git does not track empty directories, so a fresh checkout on CI has no
+    # dashboard/ folder at all yet (confirmed live 2026-07-29: FileNotFoundError
+    # on the very first run after checkout) -- make sure it exists before writing.
+    os.makedirs(os.path.dirname(DASHBOARD_PATH), exist_ok=True)
     with open(DASHBOARD_PATH, "w", encoding="utf-8") as f:
         f.write(html_out)
     return DASHBOARD_PATH
