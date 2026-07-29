@@ -20,7 +20,13 @@ THEODDSAPI_BASE_URL = "https://api.the-odds-api.com"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-SPIKE_THRESHOLD_PCT = float(os.getenv("SPIKE_THRESHOLD_PCT", "0.08"))
+SPIKE_THRESHOLD_PCT = float(os.getenv("SPIKE_THRESHOLD_PCT", "0.10"))
+
+# A line drifting by at least this much counts as "this bookmaker moved too"
+# when scoring how broad a move is (see analytics._stars). Deliberately far
+# below SPIKE_THRESHOLD_PCT: the point is not whether each book spiked, it's
+# how many books agree on the direction. Rounding jitter is under 1%.
+MIN_DRIFT_PCT = float(os.getenv("MIN_DRIFT_PCT", "0.01"))
 
 # "Super alert": two (or more) same-direction spikes on the exact same line
 # within this many minutes get flagged as a cascade -- e.g. price drops 5%,
@@ -87,20 +93,23 @@ ASIAN_SHARP_BOOKMAKERS = [
     "onexbet",
 ]
 
-# Purely geographic split -- separate axis from "sharp vs public" above.
-# Bookmakers not listed default to "europe" (see get_region()).
-BOOKMAKER_REGIONS = {
-    "pinnacle": "asia",
-    "onexbet": "asia",
-    "betonlineag": "us", "betmgm": "us", "betrivers": "us", "betus": "us",
-    "bovada": "us", "williamhill_us": "us", "draftkings": "us", "fanatics": "us",
-    "fanduel": "us", "lowvig": "us", "mybookieag": "us",
-}
-REGION_LABELS = {"asia": "🌏 Азия", "europe": "🇪🇺 Европа", "us": "🇺🇸 США"}
+# Betting EXCHANGES, not bookmakers. Their prices come from whatever one
+# random user happened to post, so a thin market swings wildly for reasons that
+# have nothing to do with information -- confirmed live 2026-07-29, betfair_ex_eu
+# showed a tennis line going 2.28 -> 9.20 (+303%) in a single 30-minute window
+# while every real bookmaker barely moved. Left out of signal generation
+# entirely (they'd drown the alerts in noise); still stored in history.
+EXCHANGE_BOOKMAKERS = ["betfair_ex_eu", "betfair_ex_uk", "betfair_ex_au", "matchbook", "smarkets"]
 
+# Long-shot outcomes (e.g. 26.00) move several percent on rounding alone, so an
+# 8% "spike" there is meaningless. Lines priced above this are ignored for
+# signals -- nobody is acting on informed money at 30-to-1 anyway.
+MAX_SIGNAL_PRICE = float(os.getenv("MAX_SIGNAL_PRICE", "12.0"))
 
-def get_region(bookmaker: str) -> str:
-    return BOOKMAKER_REGIONS.get(bookmaker.lower(), "europe")
+# How much better than the computed fair (no-vig) price a bookmaker has to be
+# before the analyst calls it value, in percent. Below this the edge is inside
+# the model's own error bars.
+MIN_EDGE_PCT = float(os.getenv("MIN_EDGE_PCT", "2.0"))
 
 
 # Purely informational -- how often .github/workflows/poll.yml is scheduled to
@@ -108,6 +117,9 @@ def get_region(bookmaker: str) -> str:
 # can tell how fresh the data is and when the next refresh is due. Keep in
 # sync with the cron expression in poll.yml.
 POLL_INTERVAL_MINUTES = int(os.getenv("POLL_INTERVAL_MINUTES", "30"))
+
+# Public URL of the dashboard, linked at the bottom of each Telegram digest.
+DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://kev1nst21.github.io/odds-tracker/")
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "odds_history_v2.db")
 DASHBOARD_PATH = os.path.join(os.path.dirname(__file__), "dashboard", "index.html")

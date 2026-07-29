@@ -1,12 +1,13 @@
-"""Single poll cycle: discover sports -> fetch odds -> store snapshot ->
-detect spikes -> notify -> update dashboard -> (periodically) check results.
-Run this once per interval (see README.md for how to schedule it)."""
+"""Single poll cycle: discover sports -> fetch odds -> detect movement ->
+build one summary per event -> notify -> update dashboard -> (periodically)
+check results. Run this once per interval (see README.md)."""
 from datetime import datetime, timezone
 
+from config import DASHBOARD_URL
 import odds_client
 import storage
 import detector
-import consensus
+import analytics
 import notifier
 import dashboard
 import results
@@ -28,30 +29,27 @@ def run_once():
     raw = odds_client.fetch_odds_for_sports(sport_keys, on_error=_warn_sport_error)
     records = odds_client.flatten_odds(raw)
 
-    spikes = detector.detect_spikes(records, fetched_at)
-    divergences = consensus.sharp_vs_public(records)
-    region_rows = consensus.region_breakdown(records)
+    spikes, movements = detector.detect(records, fetched_at)
+    summaries = analytics.build_event_summaries(records, spikes, movements)
 
     storage.save_snapshot(records, fetched_at)
-    notifier.notify_spikes(spikes)
-    notifier.notify_digest(divergences)
-    notifier.notify_region_digest(region_rows)
+    notifier.notify_summaries(summaries, dashboard_url=DASHBOARD_URL)
 
-    # Costs quota (scores call per sport with pending alerts), so this is
+    # Costs quota (one scores call per sport with pending alerts), so this is
     # internally throttled to run at most once every RESULTS_CHECK_INTERVAL_HOURS.
     newly_resolved = results.check_pending_results()
 
-    path = dashboard.render_dashboard(
-        spikes, divergences, region_rows, quota=odds_client.LAST_QUOTA
-    )
+    path = dashboard.render_dashboard(summaries, quota=odds_client.LAST_QUOTA)
 
+    with_value = sum(1 for s in summaries if s.get("has_value"))
+    with_move = sum(1 for s in summaries if s.get("has_move"))
+    starred = sum(1 for s in summaries if s.get("stars", 0) >= 3)
     print(
         f"[{fetched_at}] sports={sport_keys} fetched {len(records)} lines, "
-        f"{len(spikes)} spikes, {len(divergences)} sharp/public divergences, "
-        f"{len(region_rows)} Asia/Europe divergences, {newly_resolved} alerts resolved, "
-        f"dashboard -> {path}"
+        f"{len(summaries)} events, {with_move} with movement, {with_value} with value, "
+        f"{starred} with 3 stars, {newly_resolved} alerts resolved, dashboard -> {path}"
     )
-    return spikes, divergences, region_rows
+    return summaries
 
 
 if __name__ == "__main__":

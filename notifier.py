@@ -1,62 +1,85 @@
-"""Sends spike alerts to Telegram.
+"""Sends consolidated event summaries to Telegram.
 
-2026-07-29: rewritten per explicit user request -- event names now show in
-**bold** (Telegram HTML parse_mode), and every alert ends with a clear
-"ИТОГ:" line explaining what the move likely means and how much to trust it,
-instead of a bare price-change line the user has to interpret themselves."""
+2026-07-29, second pass. What changed and why:
+  - One message block per EVENT, not per odds line. Before, one football match
+    could fire four separate alerts describing the same market move from
+    different sides ("+16.7% here, -15.4% there"), which read as contradictory
+    noise. Now every event appears once.
+  - Bookmaker name lists in parentheses are gone. Only the single book holding
+    the best price is named, because that's the only one worth acting on.
+  - Prices are shown as a market range (from-to) instead of a single book's
+    number, so the spread across the market is visible at a glance.
+  - Each event ends with the analyst line: the price to bet from (no-vig fair
+    price) and how much room is left over it.
+  - The separate Asia-vs-Europe digest was removed entirely; that split is
+    merged into the single summary, which cuts the message count per cycle
+    from three to one.
+"""
 import html
 
 import requests
 
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
+DISCLAIMER = (
+    "<i>Расчёт по модели справедливой цены, а не рекомендация. "
+    "Ставки — это риск потерять деньги.</i>"
+)
 
-def _event_line(s: dict) -> str:
+
+def _fmt_start(iso: str) -> str:
+    if not iso:
+        return ""
+    text = str(iso).replace("Z", "+00:00")
+    try:
+        from datetime import datetime
+        dt = datetime.fromisoformat(text)
+        return dt.strftime("%d.%m %H:%M UTC")
+    except ValueError:
+        return str(iso)
+
+
+def _outcome_line(o: dict) -> str:
+    """One outcome: name, market range, how many books moved it, fair price."""
+    name = html.escape(o["name"])
+    if abs(o["max_price"] - o["min_price"]) < 0.01:
+        price = f"{o['max_price']:.2f}"
+    else:
+        price = f"{o['min_price']:.2f}–{o['max_price']:.2f}"
+
+    marks = []
+    if o.get("down_count"):
+        marks.append(f"↓ просело у {o['down_count']} из {o['books_count']}")
+        if o.get("avg_down_pct") is not None:
+            marks.append(f"{o['avg_down_pct']:.1f}%")
+    if o.get("fair_price"):
+        marks.append(f"справедливо {o['fair_price']:.2f}")
+    tail = f"  <i>{html.escape(' · '.join(marks))}</i>" if marks else ""
+    return f"• {name} — <b>{price}</b>{tail}"
+
+
+def _format_event(s: dict) -> str:
     home = html.escape(s.get("home_team") or "?")
     away = html.escape(s.get("away_team") or "?")
-    return f"<b>{home} vs {away}</b>"
+    start = _fmt_start(s.get("start_time"))
+    stars = "⭐" * s.get("stars", 0)
+    flag = "💎" if s.get("has_value") else "📈"
+    title = f"{stars} {flag}".strip() if stars else flag
 
+    lines = [f"{title} <b>{home} — {away}</b>"]
+    if start:
+        lines.append(f"<i>старт {html.escape(start)}</i>")
+    lines += [_outcome_line(o) for o in s["outcomes"]]
 
-def _outcome_text(s: dict) -> str:
-    label = s.get("label") or f"{s.get('market_id')}/{s.get('outcome_id')}"
-    # label is "Home vs Away: Outcome" -- keep only the outcome part here,
-    # the event name is already shown in bold above it.
-    if ":" in label:
-        return label.split(":", 1)[1].strip()
-    return label
-
-
-def _itog_for_spike(s: dict) -> str:
-    """One clear, plain-language line explaining what this move likely means
-    and how much weight to give it -- the "so what" the user explicitly
-    asked for, not just raw numbers."""
-    who = "Шарпы (Азия)" if s["is_sharp_book"] else "Паблик-контора"
-    outcome = _outcome_text(s)
-    if s["pct_change"] < 0:
-        meaning = f"{who} двигает деньги НА «{outcome}» — котировка укорачивается, рынок сильнее верит в этот исход."
+    bv = s.get("best_value")
+    if bv:
+        lines.append(
+            f"<b>ИТОГ:</b> {html.escape(s['verdict'])}\n"
+            f"Лучшая цена сейчас у <b>{html.escape(bv['best_book'])}</b>."
+        )
     else:
-        meaning = f"{who} уходит ОТ «{outcome}» — котировка растёт, рынок теряет веру в этот исход."
-    if s["is_sharp_book"] and s.get("is_cascade"):
-        confidence = "Надёжность: ВЫСОКАЯ — это шарп-букмекер, и линия уже второй раз подряд идёт в одну сторону."
-    elif s["is_sharp_book"]:
-        confidence = "Надёжность: высокая — движение пришло со стороны шарп-букмекера (обычно значит, что деньги информированные)."
-    elif s.get("is_cascade"):
-        confidence = "Надёжность: средняя — движение повторное, но с публичной конторы, стоит подтвердить у шарпов."
-    else:
-        confidence = "Надёжность: средняя/низкая — публичная контора, может быть шум или реакция на ставки любителей."
-    return f"{meaning} {confidence}"
-
-
-def _format_spike(s: dict) -> str:
-    direction = "⬆️ РОСТ" if s["pct_change"] > 0 else "⬇️ ПАДЕНИЕ"
-    tag = "🌏 ШАРП (Азия)" if s["is_sharp_book"] else "публичная контора"
-    prefix = f"🚨 СУПЕР-АЛЕРТ (x{s['cascade_count']} подряд) " if s.get("is_cascade") else "⚡ "
-    return (
-        f"{prefix}{_event_line(s)}\n"
-        f"[{tag}] {html.escape(s['bookmaker'])} · {html.escape(_outcome_text(s))}\n"
-        f"{s['prev_price']:.2f} → {s['price']:.2f} ({direction} {abs(s['pct_change']) * 100:.1f}%)\n"
-        f"<b>ИТОГ:</b> {html.escape(_itog_for_spike(s))}"
-    )
+        lines.append(f"<b>ИТОГ:</b> {html.escape(s['verdict'])}")
+    return "\n".join(lines)
 
 
 def send_telegram_message(text: str):
@@ -78,92 +101,29 @@ def send_telegram_message(text: str):
         print(f"[notifier] Telegram send failed: {resp.status_code} {resp.text[:300]}")
 
 
-def notify_spikes(spikes: list, max_messages: int = 10):
-    if not spikes:
+def notify_summaries(summaries: list, max_events: int = 6, dashboard_url: str = None):
+    """Single digest for the whole cycle. Only events that actually have
+    something to say (value found, or the line moved) are sent -- a list of
+    events where nothing happened is not worth a notification."""
+    interesting = [s for s in summaries if s.get("has_value") or s.get("has_move")]
+    if not interesting:
         return
 
-    # Cascades (repeated same-direction moves within the window) go out as
-    # their own urgent message first, separate from the regular digest --
-    # these are the ones most likely to actually mean something.
-    cascades = [s for s in spikes if s.get("is_cascade")]
-    if cascades:
-        header = f"🚨🚨 <b>{len(cascades)} СУПЕР-АЛЕРТ(ов)</b> — повторное движение линии в одну сторону\n\n"
-        body = "\n\n".join(_format_spike(s) for s in cascades[:max_messages])
-        send_telegram_message(header + body)
+    starred = sum(1 for s in interesting if s.get("stars", 0) >= 3)
+    value_count = sum(1 for s in interesting if s.get("has_value"))
+    header = f"⚡ <b>Сводка по рынку — {len(interesting)} событий</b>"
+    if starred:
+        header += f"\n⭐⭐⭐ движение подтверждено рынком: <b>{starred}</b>"
+    if value_count:
+        header += f"\n💎 есть запас над справедливой ценой: <b>{value_count}</b>"
 
-    header = f"⚡ <b>{len(spikes)} движение(й) котировок</b>\n\n"
-    body = "\n\n".join(_format_spike(s) for s in spikes[:max_messages])
+    body = "\n\n".join(_format_event(s) for s in interesting[:max_events])
+
     footer = ""
-    if len(spikes) > max_messages:
-        footer = f"\n\n...и ещё {len(spikes) - max_messages}, см. дашборд."
-    send_telegram_message(header + body + footer)
+    if len(interesting) > max_events:
+        footer += f"\n\n<i>...и ещё {len(interesting) - max_events} событий на сайте.</i>"
+    if dashboard_url:
+        footer += f"\n\n🌐 {dashboard_url}"
+    footer += f"\n\n{DISCLAIMER}"
 
-
-def _divergence_event_line(d: dict) -> str:
-    home = html.escape(d.get("home_team") or "?")
-    away = html.escape(d.get("away_team") or "?")
-    return f"<b>{home} vs {away}</b>"
-
-
-def _divergence_outcome(d: dict) -> str:
-    label = d.get("label") or f"{d.get('market_id')}/{d.get('outcome_id')}"
-    if ":" in label:
-        return label.split(":", 1)[1].strip()
-    return label
-
-
-def _format_divergence(d: dict) -> str:
-    gap_pct = d["divergence_pct"] * 100
-    leading = "шарпы дают ЛУЧШУЮ котировку" if gap_pct > 0 else "паблик даёт ЛУЧШУЮ котировку"
-    itog = (
-        f"Разрыв {gap_pct:+.1f}% между шарпами и паблик-конторами — "
-        f"{leading}. Обычно паблик подтягивается к шарпам, а не наоборот, "
-        f"так что стоит смотреть в сторону шарп-цены, пока разрыв не закроется."
-    )
-    return (
-        f"{_divergence_event_line(d)}\n"
-        f"{html.escape(_divergence_outcome(d))}\n"
-        f"шарп avg {d['sharp_avg']:.2f} ({html.escape(', '.join(d['sharp_books']))}) vs "
-        f"паблик avg {d['public_avg']:.2f} ({html.escape(', '.join(d['public_books']))})\n"
-        f"<b>ИТОГ:</b> {itog}"
-    )
-
-
-def notify_digest(divergences: list, max_messages: int = 5):
-    """Sharp-vs-public summary -- the 'big picture' view across every
-    tracked bookmaker/tournament, not just single-line spikes."""
-    if not divergences:
-        return
-    header = f"📊 <b>Sharp vs Public — {len(divergences)} расхождение(й)</b>\n\n"
-    body = "\n\n".join(_format_divergence(d) for d in divergences[:max_messages])
-    footer = ""
-    if len(divergences) > max_messages:
-        footer = f"\n\n...и ещё {len(divergences) - max_messages}, см. дашборд."
-    send_telegram_message(header + body + footer)
-
-
-def _format_region(d: dict) -> str:
-    gap_pct = d["divergence_pct"] * 100
-    leading = "Азия впереди рынка" if gap_pct > 0 else "Европа впереди рынка"
-    itog = f"Разрыв {gap_pct:+.1f}% между регионами — {leading}. Возможен сигнал раннего движения, который ещё не отыгран в другом регионе."
-    return (
-        f"{_divergence_event_line(d)}\n"
-        f"{html.escape(_divergence_outcome(d))}\n"
-        f"🌏 Азия avg {d['asia_avg']:.2f} ({html.escape(', '.join(d['asia_books']))}) vs "
-        f"🇪🇺 Европа avg {d['europe_avg']:.2f} ({html.escape(', '.join(d['europe_books']))})\n"
-        f"<b>ИТОГ:</b> {itog}"
-    )
-
-
-def notify_region_digest(region_rows: list, max_messages: int = 5):
-    """Pure geographic summary (Asia vs Europe), separate from the sharp/public
-    digest above -- a clearer view when you just want to see where the two
-    markets disagree, regardless of which side is 'sharper'."""
-    if not region_rows:
-        return
-    header = f"🌏🇪🇺 <b>Азия vs Европа — {len(region_rows)} расхождение(й)</b>\n\n"
-    body = "\n\n".join(_format_region(d) for d in region_rows[:max_messages])
-    footer = ""
-    if len(region_rows) > max_messages:
-        footer = f"\n\n...и ещё {len(region_rows) - max_messages}, см. дашборд."
-    send_telegram_message(header + body + footer)
+    send_telegram_message(f"{header}\n\n{body}{footer}")
