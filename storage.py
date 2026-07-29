@@ -332,6 +332,39 @@ def alert_stats():
         }
 
 
+def snapshot_meta():
+    """Describes the most recent poll: when it ran, how many odds lines it
+    stored, and which bookmakers / sports / events actually came back. The
+    dashboard shows this so a reader can see exactly where the numbers on the
+    page came from, rather than having to trust an unlabelled table."""
+    with _conn() as conn:
+        row = conn.execute("SELECT MAX(fetched_at) AS last FROM odds_snapshots").fetchone()
+        last = row["last"] if row else None
+        if not last:
+            return {"fetched_at": None, "lines": 0, "bookmakers": [], "sports": [], "events": 0}
+        stats = conn.execute(
+            "SELECT COUNT(*) AS lines, COUNT(DISTINCT fixture_id) AS events "
+            "FROM odds_snapshots WHERE fetched_at=?",
+            (last,),
+        ).fetchone()
+        books = [r["bookmaker"] for r in conn.execute(
+            "SELECT DISTINCT bookmaker FROM odds_snapshots WHERE fetched_at=? ORDER BY bookmaker",
+            (last,),
+        ).fetchall()]
+        sports = [r["sport_key"] for r in conn.execute(
+            "SELECT DISTINCT sport_key FROM odds_snapshots WHERE fetched_at=? AND sport_key IS NOT NULL "
+            "ORDER BY sport_key",
+            (last,),
+        ).fetchall()]
+        return {
+            "fetched_at": last,
+            "lines": stats["lines"],
+            "events": stats["events"],
+            "bookmakers": books,
+            "sports": sports,
+        }
+
+
 def recent_snapshots(limit=200):
     with _conn() as conn:
         rows = conn.execute(

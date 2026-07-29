@@ -103,5 +103,11 @@ def get_region(bookmaker: str) -> str:
     return BOOKMAKER_REGIONS.get(bookmaker.lower(), "europe")
 
 
+# Purely informational -- how often .github/workflows/poll.yml is scheduled to
+# run. Nothing enforces this in code; it's shown on the dashboard so a reader
+# can tell how fresh the data is and when the next refresh is due. Keep in
+# sync with the cron expression in poll.yml.
+POLL_INTERVAL_MINUTES = int(os.getenv("POLL_INTERVAL_MINUTES", "30"))
+
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "odds_history_v2.db")
 DASHBOARD_PATH = os.path.join(os.path.dirname(__file__), "dashboard", "index.html")

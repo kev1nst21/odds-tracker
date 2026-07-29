@@ -41,7 +41,9 @@ def run_once():
     # internally throttled to run at most once every RESULTS_CHECK_INTERVAL_HOURS.
     newly_resolved = results.check_pending_results()
 
-    path = dashboard.render_dashboard(spikes, divergences, region_rows)
+    path = dashboard.render_dashboard(
+        spikes, divergences, region_rows, quota=odds_client.LAST_QUOTA
+    )
 
     print(
         f"[{fetched_at}] sports={sport_keys} fetched {len(records)} lines, "

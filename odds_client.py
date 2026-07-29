@@ -32,6 +32,12 @@ class TheOddsApiError(RuntimeError):
     pass
 
 
+# Last quota figures reported by the API (x-requests-used / x-requests-remaining
+# response headers). Kept module-level so the dashboard can show how much of the
+# monthly credit budget is left without spending an extra call to look it up.
+LAST_QUOTA = {"used": None, "remaining": None}
+
+
 def _get(path: str, params: dict):
     if not THEODDSAPI_KEY:
         raise TheOddsApiError(
@@ -44,6 +50,11 @@ def _get(path: str, params: dict):
     remaining = resp.headers.get("x-requests-remaining")
     used = resp.headers.get("x-requests-used")
     if remaining is not None:
+        try:
+            LAST_QUOTA["used"] = int(float(used))
+            LAST_QUOTA["remaining"] = int(float(remaining))
+        except (TypeError, ValueError):
+            pass
         print(f"[odds_client] quota: used={used} remaining={remaining} (call: {path})")
     return resp.json()
 
