@@ -51,6 +51,7 @@ from config import (
     ASIAN_SHARP_BOOKMAKERS,
     EXCHANGE_BOOKMAKERS,
     MAX_SIGNAL_PRICE,
+    MIN_SIGNAL_PRICE,
     ENTRY_MIN_GAP_PCT,
     EXCLUDE_DRAW,
     SPIKE_THRESHOLD_PCT,
@@ -68,10 +69,13 @@ def is_signal_book(bookmaker: str) -> bool:
 
 
 def _usable(record) -> bool:
+    """Must stay identical to the filter in detector.detect() -- if the two
+    disagree, a bookmaker can appear in the movement list without appearing in
+    the price list, which produced "просело у 8 из 4 контор" on 2026-07-29."""
     return (
         is_signal_book(record.get("bookmaker"))
         and record.get("price")
-        and 1.01 < float(record["price"]) <= MAX_SIGNAL_PRICE
+        and MIN_SIGNAL_PRICE <= float(record["price"]) <= MAX_SIGNAL_PRICE
     )
 
 
@@ -133,7 +137,8 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
 
     moves = defaultdict(list)
     for m in movements:
-        if is_signal_book(m.get("bookmaker")) and float(m.get("price") or 0) <= MAX_SIGNAL_PRICE:
+        price = float(m.get("price") or 0)
+        if is_signal_book(m.get("bookmaker")) and MIN_SIGNAL_PRICE <= price <= MAX_SIGNAL_PRICE:
             moves[(m["fixture_id"], m["outcome_id"])].append(m)
 
     spiked_sides = {(s["fixture_id"], s["outcome_id"]) for s in spikes
@@ -158,7 +163,12 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
             prices = list(prices_by_book.values())
 
             move_list = moves.get((fixture_id, side)) or []
-            dropped = [m for m in move_list if m["pct_change"] < 0]
+            # Belt and braces on top of the shared price filter: only count a
+            # bookmaker as having moved if it is also currently quoting this
+            # outcome, so "просело у N из M" can never report N > M whatever
+            # else changes upstream.
+            dropped = [m for m in move_list
+                       if m["pct_change"] < 0 and m["bookmaker"].lower() in prices_by_book]
             down_books = {m["bookmaker"].lower() for m in dropped}
             sharp_down = any(b in ASIAN_SHARP_BOOKMAKERS for b in down_books)
 

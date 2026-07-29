@@ -29,7 +29,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ODDS//TRACKER — трекер движения коэффициентов</title>
+<title>KEWA / Vilka / Tracker — трекер движения коэффициентов</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;800;900&family=Rajdhani:wght@500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <style>
@@ -168,7 +168,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <body>
 <div class="wrap">
   <div class="banner">
-    <h1>⚡ ODDS // TRACKER<span>ТРЕКЕР ДВИЖЕНИЯ КОЭФФИЦИЕНТОВ</span></h1>
+    <h1>⚡ KEWA / VILKA / TRACKER<span>ТРЕКЕР ДВИЖЕНИЯ КОЭФФИЦИЕНТОВ</span></h1>
     <div class="meta">
       <span class="{freshness_class}">{freshness_label}</span><br>
       обновлено {updated_ago}<br>

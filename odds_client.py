@@ -16,6 +16,8 @@ differences from the old client:
   - GET /v4/sports/{sport}/scores/ returns recent + live results for that
     sport; daysFrom<=1 costs 1 credit, daysFrom 2-3 costs 2 credits.
 """
+from datetime import datetime, timedelta, timezone
+
 import requests
 
 from config import (
@@ -25,6 +27,8 @@ from config import (
     MARKETS,
     SOCCER_LEAGUE_KEYS,
     TENNIS_GROUP,
+    PREMATCH_ONLY,
+    PREMATCH_BUFFER_MINUTES,
 )
 
 
@@ -137,6 +141,24 @@ def _side_for_outcome(name: str, home_team: str, away_team: str):
     return _SIDE_ALIASES.get(key)
 
 
+def _is_prematch(commence_time, now=None) -> bool:
+    """True if the event hasn't started yet (plus a small buffer). Anything
+    already under way is in-play: its prices react to goals and breaks of
+    serve, not to money, so it can only produce false signals."""
+    if not PREMATCH_ONLY:
+        return True
+    if not commence_time:
+        return False  # unknown start time -- safer to skip than to guess
+    try:
+        start = datetime.fromisoformat(str(commence_time).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return start > now + timedelta(minutes=PREMATCH_BUFFER_MINUTES)
+
+
 def flatten_odds(raw_events: list) -> list:
     """Turn the nested The Odds API response into flat records:
     {fixture_id, sport_key, sport_title, start_time, home_team, away_team,
@@ -150,9 +172,13 @@ def flatten_odds(raw_events: list) -> list:
     the rest of the pipeline (detector/storage key on 5 fields).
     """
     records = []
+    skipped_live = 0
     for event in raw_events:
         fixture_id = event.get("id")
         start_time = event.get("commence_time")
+        if not _is_prematch(start_time):
+            skipped_live += 1
+            continue
         home_team = event.get("home_team")
         away_team = event.get("away_team")
         sport_key = event.get("_sport_key") or event.get("sport_key")
@@ -183,4 +209,6 @@ def flatten_odds(raw_events: list) -> list:
                         "price": float(price),
                         "label": label,
                     })
+    if skipped_live:
+        print(f"[odds_client] skipped {skipped_live} in-play event(s) -- pre-match only")
     return records

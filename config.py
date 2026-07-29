@@ -106,6 +106,27 @@ EXCHANGE_BOOKMAKERS = ["betfair_ex_eu", "betfair_ex_uk", "betfair_ex_au", "match
 # signals -- nobody is acting on informed money at 30-to-1 anyway.
 MAX_SIGNAL_PRICE = float(os.getenv("MAX_SIGNAL_PRICE", "12.0"))
 
+# A decimal price at or below this is not a real market -- 1.00 pays nothing
+# back, and anything under ~1.05 is a settled or suspended line rather than a
+# quote you could take. Confirmed live 2026-07-29: a tennis line showed
+# "просел до 1.00", and because detector and analytics applied DIFFERENT lower
+# bounds, the same event reported "просело у 8 из 4 контор" -- more books moving
+# than were quoting. Both modules now filter on this one constant so the two
+# counts can never disagree again.
+MIN_SIGNAL_PRICE = float(os.getenv("MIN_SIGNAL_PRICE", "1.05"))
+
+# Drop events that have already kicked off. The odds endpoint keeps returning
+# in-play matches, and their prices move on what is happening ON THE PITCH --
+# a goal or a break of serve repositions the line instantly, which has nothing
+# to do with money arriving before the event. Confirmed live 2026-07-29: an
+# already-started tennis match showed "просел до 1.00" simply because it was
+# nearly decided. Those are not signals and are excluded everywhere.
+PREMATCH_ONLY = os.getenv("PREMATCH_ONLY", "1") not in ("0", "false", "False")
+
+# Small cushion so a match starting in the next minute or two -- where the
+# market is already effectively live -- doesn't sneak through.
+PREMATCH_BUFFER_MINUTES = int(os.getenv("PREMATCH_BUFFER_MINUTES", "3"))
+
 # How much better than the computed fair (no-vig) price a bookmaker has to be
 # before the analyst calls it value, in percent. Below this the edge is inside
 # the model's own error bars.

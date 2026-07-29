@@ -22,6 +22,7 @@ from config import (
     CASCADE_WINDOW_MINUTES,
     EXCHANGE_BOOKMAKERS,
     MAX_SIGNAL_PRICE,
+    MIN_SIGNAL_PRICE,
     EXCLUDE_DRAW,
 )
 import storage
@@ -49,7 +50,9 @@ def detect(records, fetched_at):
         # corrupt the "is this tool actually working" numbers.
         if r["bookmaker"].lower() in EXCHANGE_BOOKMAKERS:
             continue
-        if not r["price"] or r["price"] > MAX_SIGNAL_PRICE:
+        # Must match analytics._usable() exactly -- see MIN_SIGNAL_PRICE in
+        # config.py for what went wrong when these two drifted apart.
+        if not r["price"] or not (MIN_SIGNAL_PRICE <= r["price"] <= MAX_SIGNAL_PRICE):
             continue
         # The draw is never bet, so tracking draw moves would only add rows to
         # tracked_alerts that can never be acted on and would skew the win-rate
