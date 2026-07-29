@@ -65,19 +65,42 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   }}
   .wrap {{ max-width: 1120px; margin: 0 auto; }}
 
+  /* Hero. The old header left a wide empty band on desktop; this fills it with
+     the mark at a size that can actually be read as a logo, plus the live
+     numbers, so the space earns its keep instead of being padding. */
   header.top {{
-    display: flex; align-items: flex-start; justify-content: space-between;
-    gap: 20px; flex-wrap: wrap; margin-bottom: 28px;
+    position: relative; overflow: hidden;
+    border: 1px solid var(--hairline); border-radius: 18px;
+    padding: 34px 36px; margin-bottom: 20px;
+    background:
+      radial-gradient(900px 320px at 12% -30%, rgba(57,135,229,0.20), transparent 70%),
+      radial-gradient(700px 300px at 92% 0%, rgba(250,178,25,0.10), transparent 70%),
+      var(--surface);
   }}
-  .brand {{ display: flex; align-items: center; gap: 15px; }}
-  .mark {{ flex: none; line-height: 0; filter: drop-shadow(0 4px 14px rgba(57,135,229,0.35)); }}
+  header.top::after {{
+    content: ''; position: absolute; inset: 0; pointer-events: none;
+    background-image: radial-gradient(rgba(255,255,255,0.05) 1px, transparent 1px);
+    background-size: 22px 22px; mask-image: linear-gradient(180deg, #000, transparent 75%);
+    -webkit-mask-image: linear-gradient(180deg, #000, transparent 75%);
+  }}
+  .hero {{ position: relative; z-index: 1; display: flex; align-items: center; gap: 26px; flex-wrap: wrap; }}
+  .mark {{ flex: none; line-height: 0; filter: drop-shadow(0 10px 26px rgba(57,135,229,0.45)); }}
+  .brand-text {{ flex: 1 1 320px; }}
   .brand-text h1 {{
-    font-size: 25px; font-weight: 700; letter-spacing: -0.025em; margin: 0; line-height: 1.1;
+    font-size: clamp(30px, 5vw, 46px); font-weight: 800; letter-spacing: -0.035em;
+    margin: 0; line-height: 1.02;
   }}
-  .brand-text h1 .sep {{ color: var(--accent); margin: 0 5px; font-weight: 700; }}
-  .brand-text p {{ margin: 4px 0 0; font-size: 14px; color: var(--ink-2); }}
+  .brand-text h1 .sep {{ color: var(--accent); margin: 0 6px; }}
+  .brand-text p {{
+    margin: 10px 0 0; font-size: clamp(15px, 1.6vw, 18px); color: var(--ink-2); max-width: 46ch;
+  }}
+  .hero-stats {{ display: flex; gap: 26px; flex-wrap: wrap; margin-top: 18px; }}
+  .hs b {{ display: block; font-size: 26px; font-weight: 750; letter-spacing: -0.02em; line-height: 1.1; }}
+  .hs span {{ font-size: 12.5px; color: var(--muted); }}
+  .hs.gold b {{ color: var(--warning); }}
+  .hs.green b {{ color: var(--good); }}
 
-  .status {{ min-width: 240px; }}
+  .status {{ flex: 0 0 250px; }}
   .pill {{
     display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 650;
     padding: 5px 12px; border-radius: 999px; border: 1px solid var(--hairline);
@@ -221,27 +244,75 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .note {{ color: var(--ink-2); font-size: 14px; margin: 0 0 16px; max-width: 82ch; }}
   .note b {{ color: var(--ink); font-weight: 600; }}
   footer {{ text-align: center; color: var(--muted); font-size: 12.5px; margin-top: 34px; line-height: 1.8; }}
+  /* Side rails. Purely decorative, so they are pointer-events:none, sit behind
+     everything, and only appear when there is genuinely dead space either side
+     of the 1120px column -- never on laptops or phones where they'd crowd the
+     content. Wording is deliberately about patience, price and bankroll rather
+     than "bet more": the entire point of the tool is to act on a rule instead
+     of on impulse, and hype text on the wall would work against its owner. */
+  .rail {{
+    position: fixed; top: 0; bottom: 0; width: 250px; pointer-events: none; z-index: 0;
+    display: none; flex-direction: column; justify-content: center; gap: 26px; padding: 24px;
+  }}
+  .rail.l {{ left: 0; align-items: flex-end; }}
+  .rail.r {{ right: 0; align-items: flex-start; }}
+  .sticker {{
+    background: var(--surface); border: 1px solid var(--hairline-strong);
+    border-radius: 14px; padding: 13px 16px; max-width: 205px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.45); opacity: 0.62;
+  }}
+  .sticker .em {{ font-size: 20px; display: block; margin-bottom: 5px; }}
+  .sticker .tx {{ font-size: 13.5px; font-weight: 650; line-height: 1.35; color: var(--ink); }}
+  .sticker .sub {{ font-size: 11.5px; color: var(--muted); margin-top: 4px; }}
+  .sticker.a {{ transform: rotate(-3.5deg); border-color: rgba(57,135,229,0.4); }}
+  .sticker.b {{ transform: rotate(2.5deg); border-color: rgba(12,163,12,0.4); }}
+  .sticker.c {{ transform: rotate(-1.5deg); border-color: rgba(250,178,25,0.4); }}
+  .sticker.d {{ transform: rotate(3deg); border-color: rgba(208,59,59,0.35); }}
+  @media (min-width: 1560px) {{ .rail {{ display: flex; }} }}
+
   @media (max-width: 640px) {{
     body {{ padding: 20px 14px 56px; }}
     section {{ padding: 18px 16px; }}
+    header.top {{ padding: 24px 20px; border-radius: 14px; }}
+    .hero {{ gap: 18px; }}
     .bank-num {{ font-size: 32px; }}
+    .hero-stats {{ gap: 18px; }}
   }}
 </style>
 </head>
 <body data-updated="{updated_iso}" data-interval="{poll_interval}">
+
+<aside class="rail l" aria-hidden="true">
+  <div class="sticker a"><span class="em">🎯</span><span class="tx">Мы не угадываем. Мы считаем.</span>
+    <div class="sub">сигнал или ничего</div></div>
+  <div class="sticker b"><span class="em">⏳</span><span class="tx">Пропустить — тоже решение</span>
+    <div class="sub">нет входа — нет ставки</div></div>
+  <div class="sticker c"><span class="em">📐</span><span class="tx">Плоская ставка. Всегда.</span>
+    <div class="sub">банкролл важнее прогноза</div></div>
+</aside>
+
+<aside class="rail r" aria-hidden="true">
+  <div class="sticker c"><span class="em">💸</span><span class="tx">Цену делает не матч, а деньги</span>
+    <div class="sub">смотри, куда они пошли</div></div>
+  <div class="sticker a"><span class="em">⭐</span><span class="tx">Три звезды бьют интуицию</span>
+    <div class="sub">чем больше контор — тем вернее</div></div>
+  <div class="sticker d"><span class="em">🚫</span><span class="tx">Не отыгрывайся</span>
+    <div class="sub">рынок не должен тебе ничего</div></div>
+</aside>
+
 <div class="wrap">
   <header class="top">
-    <div class="brand">
+    <div class="hero">
       <div class="mark" aria-hidden="true">
-        <svg viewBox="0 0 64 64" width="52" height="52" role="img">
+        <svg viewBox="0 0 64 64" width="104" height="104" role="img">
           <defs>
             <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0" stop-color="#3987e5"/><stop offset="1" stop-color="#1c5cab"/>
+              <stop offset="0" stop-color="#3987e5"/><stop offset="1" stop-color="#16478a"/>
             </linearGradient>
           </defs>
           <rect x="0" y="0" width="64" height="64" rx="17" fill="url(#bg)"/>
-          <!-- cartoon fork: the tines double as a rising line, since "вилка"
-               is both a fork and the betting term for an arb -->
+          <!-- The fork is the joke and the thesis: "вилка" is both cutlery and
+               the betting term for an arb, and its tines double as a rising line. -->
           <g stroke="#0d0d0d" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M20 15v11" fill="none" stroke="#fdfdfb"/>
             <path d="M27 13v13" fill="none" stroke="#fdfdfb"/>
@@ -259,21 +330,28 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
                 stroke-linejoin="round"/>
         </svg>
       </div>
+
       <div class="brand-text">
         <h1>KEWA<span class="sep">·</span>VILKA<span class="sep">·</span>TRACKER</h1>
-        <p>Ловим деньги раньше, чем их увидит рынок</p>
-      </div>
-    </div>
-
-    <div class="status">
-      <span class="pill {freshness_class}"><span class="dot"></span>{freshness_label}</span>
-      <div class="countdown">
-        <div class="cd-row">
-          <span class="cd-label">Следующее обновление через</span>
-          <span class="cd-time" id="cd">--:--</span>
+        <p>Ловим деньги раньше, чем их увидит рынок.</p>
+        <div class="hero-stats">
+          <div class="hs"><b>{hero_events}</b><span>событий в работе</span></div>
+          <div class="hs green"><b>{hero_open}</b><span>с открытым входом</span></div>
+          <div class="hs gold"><b>{hero_stars}</b><span>на три звезды</span></div>
+          <div class="hs"><b>{hero_books}</b><span>контор в опросе</span></div>
         </div>
-        <div class="cd-bar"><i id="cdbar" style="width:0%"></i></div>
-        <small id="cdago">обновлено {updated_ago}</small>
+      </div>
+
+      <div class="status">
+        <span class="pill {freshness_class}"><span class="dot"></span>{freshness_label}</span>
+        <div class="countdown">
+          <div class="cd-row">
+            <span class="cd-label">Обновление через</span>
+            <span class="cd-time" id="cd">--:--</span>
+          </div>
+          <div class="cd-bar"><i id="cdbar" style="width:0%"></i></div>
+          <small id="cdago">обновлено {updated_ago}</small>
+        </div>
       </div>
     </div>
   </header>
@@ -663,6 +741,10 @@ def render_dashboard(summaries: list, quota: dict = None):
         freshness_label="в эфире" if fresh else "данные устарели",
         poll_interval=POLL_INTERVAL_MINUTES,
         threshold_pct=f"{SPIKE_THRESHOLD_PCT * 100:.0f}",
+        hero_events=len(summaries or []),
+        hero_open=sum(1 for s in (summaries or []) if s.get("has_entry")),
+        hero_stars=sum(1 for s in (summaries or []) if s.get("stars", 0) >= 3),
+        hero_books=len(meta.get("bookmakers") or []),
         summaries_html=_summaries_html(summaries or []),
         stats_card=_stats_card(storage.alert_stats()),
         last_bets=_last_bets(storage.recent_bets(5)),
