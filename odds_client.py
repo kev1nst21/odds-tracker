@@ -32,7 +32,7 @@ MIN_REQUEST_INTERVAL_SEC = 0.25
 MAX_RETRIES = 5
 
 
-def _get(path: str, params: dict) -> dict:
+def _get(path: str, params: dict, treat_404_as_empty: bool = False):
     if not ODDSPAPI_KEY:
         raise OddsPapiError(
             "ODDSPAPI_KEY is not set. Copy .env.example to .env and fill it in."
@@ -53,6 +53,13 @@ def _get(path: str, params: dict) -> dict:
             time.sleep(wait_sec)
             continue
         time.sleep(MIN_REQUEST_INTERVAL_SEC)
+        # Confirmed live (2026-07-29): odds-by-tournaments 404s with
+        # FIXTURE_NOT_FOUND whenever a given tournament/bookmaker combo simply
+        # has no matches scheduled right now -- completely normal, not an
+        # error, so callers that expect this (see fetch_odds_by_tournaments)
+        # get an empty list back instead of a crash.
+        if resp.status_code == 404 and treat_404_as_empty:
+            return []
         if resp.status_code != 200:
             raise OddsPapiError(f"{resp.status_code} from {path}: {resp.text[:500]}")
         return resp.json()
@@ -66,6 +73,15 @@ def list_sports() -> list:
 
 def list_tournaments(sport_id: int) -> list:
     return _get("/v4/tournaments", {"sportId": sport_id})
+
+
+def get_fixture(fixture_id) -> dict:
+    """Fetch fixture details -- used post-match to look up the final result
+    for scoring alerts (see results.py). Exact shape of the result/score
+    fields hasn't been confirmed against a finished live fixture yet, so
+    results.py parses this defensively and leaves anything it can't
+    confidently read as unresolved rather than guessing."""
+    return _get("/v4/fixture", {"fixtureId": fixture_id})
 
 
 def _chunk(seq, size):
@@ -90,7 +106,7 @@ def fetch_odds_by_tournaments(tournament_ids: list, bookmakers: list) -> list:
                 "tournamentIds": ",".join(str(t) for t in chunk),
                 "bookmaker": bookmaker,
             }
-            data = _get("/v4/odds-by-tournaments", params)
+            data = _get("/v4/odds-by-tournaments", params, treat_404_as_empty=True)
             if isinstance(data, list):
                 all_fixtures.extend(data)
     return all_fixtures
