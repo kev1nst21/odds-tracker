@@ -347,7 +347,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
           <div class="hs green"><b>{hero_open}</b><span>вход открыт сейчас</span></div>
           <div class="hs gold"><b>{hero_stars}</b><span>на три звезды</span></div>
         </div>
-        <p class="hero-note">{cov_cycles} срезов рынка за сутки · {cov_sports} лиг и дисциплин ·
+        <p class="hero-note">{cov_cycles} {cov_cycles_word} рынка за сутки · {cov_sports} {cov_sports_word} ·
         два независимых поставщика данных · проверка каждые {poll_interval} минут</p>
       </div>
 
@@ -795,7 +795,10 @@ def render_dashboard(summaries: list, quota: dict = None, live_rows: list = None
         cov_books=cov["books"], cov_events=f"{cov['events']:,}".replace(',', ' '),
         cov_lines=f"{cov['lines']:,}".replace(',', ' '),
         cov_moves=f"{cov['moves']:,}".replace(',', ' '),
-        cov_cycles=cov["cycles"], cov_sports=cov["sports"],
+        cov_cycles=cov["cycles"],
+        cov_cycles_word=_plural(cov["cycles"], 'срез', 'среза', 'срезов'),
+        cov_sports=cov["sports"],
+        cov_sports_word=_plural(cov["sports"], 'лига и дисциплина', 'лиги и дисциплины', 'лиг и дисциплин'),
         summaries_html=_summaries_html(summaries or []),
         live_table=_live_table(live_rows or []),
         stats_card=_stats_card(storage.alert_stats("prematch")),
