@@ -108,11 +108,17 @@ assert sent and "СТАВИМ" in sent[0], "a 30% move with an entry must be sen
 path = dashboard.render_dashboard(summaries)
 with open(path, encoding="utf-8") as f:
     page = f.read()
-assert "Arsenal" in page and "СТАВИМ" in page
+assert "Arsenal" in page
 assert "betfair_ex_eu" not in page
-# "Ничья" is allowed in the explanatory note, but never inside an event card.
-cards = page.split("<div class='ev ")[1:]
-assert cards and all("Ничья" not in c for c in cards), "draw must not appear in any card"
+# Compact feed: one row per event, carrying the star filter metadata the
+# in-page buttons key off.
+rows = page.split("<tr class='row")[1:]
+assert len(rows) == 1, f"expected exactly one event row, got {len(rows)}"
+assert "data-stars='3'" in page and "data-open='1'" in page, "filter metadata missing"
+assert "data-f='3'" in page and "addEventListener" in page, "star filter controls missing"
+assert f"{SLOW_BOOK}" in rows[0], "the row must name the book to bet at"
+# "Ничья" may appear in the explanatory note, but never inside an event row.
+assert all("Ничья" not in r for r in rows), "draw must not appear in any row"
 
 print("OK: money-flow strategy, draw exclusion, 10% gate, exchange filter all verified.")
 print(f"Verdict: {s['verdict']}")

@@ -112,27 +112,44 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .ev-head {{ display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }}
   .ev-name {{ font-size: 16px; font-weight: 700; color: var(--text); }}
   .ev-when {{ font-family: 'Share Tech Mono', monospace; font-size: 12px; color: var(--dim); }}
-  .flow {{ margin-bottom: 12px; }}
-  .flow-label {{ font-size: 11px; letter-spacing: 1px; color: var(--dim); font-family: 'Share Tech Mono', monospace; text-transform: uppercase; }}
-  .flow-name {{ font-size: 18px; font-weight: 700; color: var(--text); margin: 2px 0 6px; }}
-  .flow-prices {{ font-size: 20px; font-family: 'Share Tech Mono', monospace; color: var(--dim); }}
-  .flow-prices .old {{ color: var(--green); font-size: 24px; }}
-  .flow-prices .new {{ color: var(--red); font-size: 24px; }}
-  .flow-prices .arr {{ color: var(--dim); margin: 0 6px; }}
-  .flow-prices .pct {{ color: var(--red); font-size: 15px; }}
-  .flow-books {{ font-size: 12.5px; color: var(--dim); font-family: 'Share Tech Mono', monospace; margin-top: 5px; }}
-  .act {{ padding: 12px 14px; border-radius: 3px; }}
-  .act.good {{ background: rgba(43,255,168,0.08); border-left: 3px solid var(--green); }}
-  .act.bad {{ background: rgba(255,59,92,0.07); border-left: 3px solid var(--red); }}
-  .act-head {{ font-size: 17px; font-weight: 700; color: var(--green); margin-bottom: 4px; }}
-  .act.bad .act-head {{ color: var(--red); }}
-  .act-sub {{ font-size: 12px; color: var(--dim); margin-bottom: 7px; font-family: 'Share Tech Mono', monospace; }}
-  .entry {{
-    display: inline-block; font-family: 'Share Tech Mono', monospace; font-size: 13px;
-    padding: 5px 11px; margin: 0 7px 7px 0; border-radius: 3px; color: var(--text);
-    background: rgba(255,255,255,0.04); border: 1px solid rgba(43,255,168,0.35);
+  /* Compact feed: one row per event so many fit on a screen without scrolling. */
+  .filters {{ display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 14px; }}
+  .f {{
+    font-family: 'Share Tech Mono', monospace; font-size: 12.5px; cursor: pointer;
+    padding: 7px 14px; border-radius: 3px; color: var(--dim);
+    background: rgba(255,255,255,0.03); border: 1px solid var(--panel-border);
+    transition: all 0.15s ease;
   }}
-  .entry b {{ color: var(--green); font-size: 15px; }}
+  .f:hover {{ color: var(--text); border-color: var(--cyan); }}
+  .f.active {{ color: #05060a; background: var(--cyan); border-color: var(--cyan); font-weight: 700; }}
+  .f.active[data-f="3"] {{ background: var(--amber); border-color: var(--amber); }}
+  .f.active[data-f="open"] {{ background: var(--green); border-color: var(--green); }}
+  .feed-wrap {{ overflow-x: auto; }}
+  table.feed {{ width: 100%; border-collapse: collapse; font-size: 13.5px; }}
+  table.feed th {{
+    text-align: left; padding: 8px 10px; color: var(--dim); font-weight: 600;
+    font-size: 10.5px; letter-spacing: 1px; text-transform: uppercase;
+    font-family: 'Share Tech Mono', monospace; border-bottom: 1px solid var(--panel-border);
+    white-space: nowrap;
+  }}
+  table.feed td {{ padding: 9px 10px; border-bottom: 1px solid rgba(28,35,51,0.7); vertical-align: middle; }}
+  table.feed tr.row:hover {{ background: rgba(0,240,255,0.05); }}
+  table.feed tr.s3 {{ background: rgba(255,176,32,0.05); }}
+  table.feed tr.shut {{ opacity: 0.5; }}
+  .c-stars {{ white-space: nowrap; font-size: 13px; letter-spacing: -1px; }}
+  .c-ev {{ font-weight: 700; color: var(--text); line-height: 1.35; }}
+  .c-ev small {{ display: block; font-family: 'Share Tech Mono', monospace; font-size: 11px; color: var(--dim); font-weight: 400; }}
+  .c-out {{ color: var(--cyan); font-weight: 600; white-space: nowrap; }}
+  .c-move {{ font-family: 'Share Tech Mono', monospace; white-space: nowrap; font-size: 14px; }}
+  .c-move .old {{ color: var(--green); }}
+  .c-move .new {{ color: var(--red); }}
+  .c-move .pct {{ color: var(--red); font-size: 12px; }}
+  .c-books {{ font-family: 'Share Tech Mono', monospace; font-size: 12.5px; color: var(--dim); white-space: nowrap; }}
+  .c-bet {{ white-space: nowrap; }}
+  .c-bet b {{ color: var(--green); font-family: 'Share Tech Mono', monospace; font-size: 15px; }}
+  .c-bet small {{ display: block; font-family: 'Share Tech Mono', monospace; font-size: 11px; color: var(--dim); }}
+  .c-bet.shut {{ color: var(--red); font-size: 12px; font-family: 'Share Tech Mono', monospace; }}
+  .norows {{ color: var(--dim); font-style: italic; font-size: 13px; padding: 16px 4px; }}
   .badge {{
     font-size: 11px; font-family: 'Share Tech Mono', monospace; padding: 3px 8px;
     border-radius: 3px; letter-spacing: 0.5px;
@@ -178,16 +195,21 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 
   <div class="card intro">
     <h2>❓ Что это за продукт</h2>
-    <p>Автоматический трекер: каждые {poll_interval} минут снимает коэффициенты по всему рынку,
-    сводит их в <b>одну карточку на событие</b> и считает, есть ли смысл в ставке. Всё
-    важное дублируется алертом в Telegram.</p>
-    <p>Как считается цена входа: у «шарп»-контор (Pinnacle, 1xBet) берётся линия и из
-    неё убирается маржа букмекера — получается <b>справедливый коэффициент</b>, то есть
-    цена, при которой ставка выходит в ноль. Если где-то на рынке дают <b>выше</b>
-    справедливой — это и есть запас, ради которого всё работает.</p>
-    <p>Каждый сигнал потом проверяется по факту: <b>сработал ли исход</b> и <b>CLV</b> —
-    продолжила ли линия двигаться в ту же сторону до старта матча. CLV честнее: исход
-    можно угадать на удаче, движение рынка — нет.</p>
+    <p>Автоматический трекер: каждые {poll_interval} минут снимает коэффициенты по всему
+    рынку и ищет момент, когда на какой-то исход <b>занесли деньги</b>. Всё важное
+    дублируется алертом в Telegram.</p>
+    <p>Логика простая. Если коэффициент был <b>3.00</b> и у нескольких контор просел
+    до <b>2.10</b> — значит, в этот исход зашли деньги. Ставим мы <b>на тот же исход</b>,
+    но там, где цена ещё не успела упасть: забираем старые 3.00, пока их дают. Обратную
+    сторону не трогаем никогда — она подорожала механически, просто потому что деньги
+    пошли против неё.</p>
+    <p>Главный фильтр — <b>сколько контор подвинулось</b>, а не насколько сильно. Одна
+    контора может дёрнуть цену из-за чьей-то одиночной ставки или ошибки трейдера. Когда
+    один и тот же исход просел сразу у многих независимых контор за полчаса — это уже
+    информированные деньги. Отсюда и звёзды.</p>
+    <p>Работаем только по матчам <b>до старта</b>: в лайве цена скачет от голов, а не от
+    денег. Ничья в футболе не рассматривается. Биржи в расчёт не берём — там цену двигает
+    один случайный человек.</p>
   </div>
 
   <div class="card">
@@ -274,79 +296,100 @@ def _ago(value, now=None) -> str:
     return f"{hours // 24} дн назад"
 
 
-def _event_card(s: dict) -> str:
+def _event_row(s: dict) -> str:
+    """One compact table row per event. Everything needed to act on it -- which
+    side money went into, what the price was and is, how broad the move was, and
+    where to still take it -- has to fit on a single line, so the whole feed is
+    scannable without scrolling."""
     bet = s.get("bet") or {}
     stars = s.get("stars", 0)
-    cls = "value" if s.get("has_entry") else "closed"
-    if stars >= 3 and s.get("has_entry"):
-        cls = "starred"
+    has_entry = s.get("has_entry")
+    big = s.get("big_move")
 
-    badges = ""
-    if stars:
-        badges += f"<span class='badge s'>{'⭐' * stars}</span> "
-    if s.get("has_entry"):
-        badges += f"<span class='badge v'>✅ вход открыт</span> "
-    else:
-        badges += "<span class='badge c'>⛔️ вход закрыт</span> "
-    if s.get("big_move"):
-        badges += "<span class='badge m'>📈 от 10%</span>"
-
+    row_cls = "row" + (" s3" if stars >= 3 and has_entry else "") + ("" if has_entry else " shut")
     name = f"{html.escape(s.get('home_team') or '?')} — {html.escape(s.get('away_team') or '?')}"
     outcome = html.escape(bet.get("name") or "—")
 
-    flow = (
-        f"<div class='flow'>"
-        f"<div class='flow-label'>💰 Деньги зашли на</div>"
-        f"<div class='flow-name'>{outcome}</div>"
-        f"<div class='flow-prices'>был <b class='old'>{bet['old_price']:.2f}</b>"
-        f" <span class='arr'>→</span> просел до <b class='new'>{bet['new_price']:.2f}</b>"
-        f" <span class='pct'>({abs(bet['drop_pct']):.1f}%)</span></div>"
-        f"<div class='flow-books'>просело у {bet['down_count']} из {bet['books_count']} контор</div>"
-        f"</div>"
-    )
-
-    if s.get("has_entry"):
-        chips = "".join(
-            f"<span class='entry'>{html.escape(b)} <b>{p:.2f}</b></span>"
-            for b, p in bet["entries"]
-        )
-        action = (
-            f"<div class='act good'><div class='act-head'>✅ СТАВИМ {outcome} "
-            f"за {bet['entry_price']:.2f}</div>"
-            f"<div class='act-sub'>ещё не просело у:</div><div>{chips}</div></div>"
-        )
+    if has_entry:
+        bet_cell = (f"<td class='c-bet'><b>{bet['entry_price']:.2f}</b>"
+                    f"<small>{html.escape(bet['entry_book'])}</small></td>")
     else:
-        action = ("<div class='act bad'><div class='act-head'>⛔️ Вход закрыт</div>"
-                  "<div class='act-sub'>просело у всех контор — старую цену взять негде</div></div>")
+        bet_cell = "<td class='c-bet shut'>⛔️ вход закрыт</td>"
 
     return (
-        f"<div class='ev {cls}'>"
-        f"<div class='ev-head'><div><div class='ev-name'>{name}</div>"
-        f"<div class='ev-when'>старт {_fmt_start(s.get('start_time'))}</div></div>"
-        f"<div>{badges}</div></div>"
-        f"{flow}{action}"
-        f"</div>"
+        f"<tr class='{row_cls}' data-stars='{stars}' data-open='{1 if has_entry else 0}' "
+        f"data-big='{1 if big else 0}'>"
+        f"<td class='c-stars'>{'⭐' * stars}</td>"
+        f"<td class='c-ev'>{name}<small>{_fmt_start(s.get('start_time'))}</small></td>"
+        f"<td class='c-out'>{outcome}</td>"
+        f"<td class='c-move'><span class='old'>{bet['old_price']:.2f}</span> → "
+        f"<span class='new'>{bet['new_price']:.2f}</span> "
+        f"<span class='pct'>({abs(bet['drop_pct']):.0f}%)</span></td>"
+        f"<td class='c-books'>{bet['down_count']}/{bet['books_count']}</td>"
+        f"{bet_cell}</tr>"
     )
 
 
-def _summaries_html(summaries: list, limit: int = 30) -> str:
-    shown = [s for s in summaries if s.get("bet")]
+FILTER_JS = """
+<script>
+(function () {
+  var buttons = document.querySelectorAll('.f');
+  var rows = document.querySelectorAll('tr.row');
+  var empty = document.getElementById('norows');
+  function apply(mode) {
+    var shown = 0;
+    rows.forEach(function (r) {
+      var ok;
+      if (mode === 'all') ok = true;
+      else if (mode === 'open') ok = r.dataset.open === '1';
+      else if (mode === 'big') ok = r.dataset.big === '1';
+      else ok = r.dataset.stars === mode;
+      r.style.display = ok ? '' : 'none';
+      if (ok) shown++;
+    });
+    empty.style.display = shown ? 'none' : '';
+  }
+  buttons.forEach(function (b) {
+    b.addEventListener('click', function () {
+      buttons.forEach(function (x) { x.classList.remove('active'); });
+      b.classList.add('active');
+      apply(b.dataset.f);
+    });
+  });
+})();
+</script>
+"""
+
+
+def _summaries_html(summaries: list, limit: int = 120) -> str:
+    shown = [s for s in summaries if s.get("bet")][:limit]
     if not shown:
         return ('<p class="empty">Сейчас движений нет — линии стоят на месте. '
-                'Карточки появятся, как только рынок начнёт двигаться.</p>')
-    big = [s for s in shown if s.get("big_move")]
-    small = [s for s in shown if not s.get("big_move")]
+                'Строки появятся, как только рынок начнёт двигаться.</p>')
 
-    out = "".join(_event_card(s) for s in big[:limit])
-    if not big:
-        out += ('<p class="empty">Движений от 10% сейчас нет. '
-                'Ниже — то, что двигается слабее порога.</p>')
-    rest = small[:max(0, limit - len(big))]
-    if rest:
-        out += ("<p class='note' style='margin-top:16px'>Ниже — движения слабее 10%. "
-                "В бота они не отправляются, показаны только для наблюдения.</p>")
-        out += "".join(_event_card(s) for s in rest)
-    return out
+    n3 = sum(1 for s in shown if s["stars"] >= 3)
+    n2 = sum(1 for s in shown if s["stars"] == 2)
+    n1 = sum(1 for s in shown if s["stars"] == 1)
+    nopen = sum(1 for s in shown if s.get("has_entry"))
+    nbig = sum(1 for s in shown if s.get("big_move"))
+
+    filters = (
+        "<div class='filters'>"
+        f"<button class='f active' data-f='all'>Все · {len(shown)}</button>"
+        f"<button class='f' data-f='3'>⭐⭐⭐ · {n3}</button>"
+        f"<button class='f' data-f='2'>⭐⭐ · {n2}</button>"
+        f"<button class='f' data-f='1'>⭐ · {n1}</button>"
+        f"<button class='f' data-f='open'>✅ есть вход · {nopen}</button>"
+        f"<button class='f' data-f='big'>📈 от 10% · {nbig}</button>"
+        "</div>"
+    )
+
+    head = ("<tr><th></th><th>Событие</th><th>Деньги на</th>"
+            "<th>Был → стал</th><th>Контор</th><th>Ставим</th></tr>")
+    body = "".join(_event_row(s) for s in shown)
+    table = f"<div class='feed-wrap'><table class='feed'>{head}{body}</table></div>"
+    empty = "<p class='norows' id='norows' style='display:none'>Под этот фильтр ничего не подошло.</p>"
+    return filters + table + empty + FILTER_JS
 
 
 def _stats_card(stats: dict):
