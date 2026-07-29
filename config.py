@@ -58,6 +58,21 @@ PUBLIC_BOOKMAKERS = [
 
 ALL_BOOKMAKERS = ASIAN_SHARP_BOOKMAKERS + PUBLIC_BOOKMAKERS
 
+# Purely geographic split -- separate axis from "sharp vs public" above.
+# Sharp/public groups by how informed the money is; this groups by where the
+# bookmaker's core market actually is, so the dashboard can show a clean
+# "Asia vs Europe" view on request. Bookmakers not listed default to "europe".
+BOOKMAKER_REGIONS = {
+    "pinnacle": "asia", "sbobet": "asia", "singbet": "asia", "ibcbet": "asia",
+    "maxbet": "asia", "1xbet": "asia", "dafabet": "asia",
+    "stake": "us", "draftkings": "us", "fanduel": "us", "betmgm": "us", "caesars": "us",
+}
+REGION_LABELS = {"asia": "🌏 Азия", "europe": "🇪🇺 Европа", "us": "🇺🇸 США"}
+
+
+def get_region(bookmaker: str) -> str:
+    return BOOKMAKER_REGIONS.get(bookmaker.lower(), "europe")
+
+
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "odds_history.db")
 DASHBOARD_PATH = os.path.join(os.path.dirname(__file__), "dashboard", "index.html")
-"}
