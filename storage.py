@@ -442,6 +442,29 @@ def recent_bets(limit: int = 5, kind: str = "prematch"):
         ).fetchall()
 
 
+def top_books(limit: int = 10):
+    """Bookmakers ranked by how often the entry landed with them.
+
+    The entry book is the one still offering the old price after the rest of
+    the market moved -- i.e. the place the value actually was. Counting them
+    answers a genuinely useful question: which bookmakers are slowest to
+    reprice, and therefore worth having an account with. (Also the natural
+    place to hang affiliate links later.)
+    """
+    with _conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT entry_book AS book, COUNT(*) AS n,
+                   SUM(CASE WHEN kind='live' THEN 1 ELSE 0 END) AS live_n
+            FROM tracked_alerts
+            WHERE entry_book IS NOT NULL AND entry_book <> ''
+            GROUP BY entry_book ORDER BY n DESC, book ASC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [{"book": r["book"], "n": r["n"], "live_n": r["live_n"] or 0} for r in rows]
+
+
 def coverage_stats(hours: int = 24):
     """Honest scale-of-operation numbers for the header.
 

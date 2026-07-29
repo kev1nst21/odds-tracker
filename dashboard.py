@@ -256,10 +256,32 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
      than "bet more": the entire point of the tool is to act on a rule instead
      of on impulse, and hype text on the wall would work against its owner. */
   .rail {{
-    position: fixed; top: 0; bottom: 0; width: 250px; pointer-events: none; z-index: 0;
+    position: fixed; top: 0; bottom: 0; width: 260px; pointer-events: none; z-index: 0;
     display: none; flex-direction: column; justify-content: center; gap: 26px; padding: 24px;
   }}
-  .rail.l {{ left: 0; align-items: flex-end; }}
+  .rail.l {{ left: 0; align-items: flex-end; pointer-events: auto; }}
+  .board {{
+    background: var(--surface); border: 1px solid var(--hairline); border-radius: 14px;
+    padding: 16px 16px 12px; width: 212px; box-shadow: 0 12px 34px rgba(0,0,0,0.5);
+  }}
+  .board h4 {{ margin: 0; font-size: 13px; font-weight: 650; letter-spacing: -0.01em; }}
+  .board-sub {{ margin: 4px 0 12px; font-size: 11.5px; color: var(--muted); line-height: 1.35; }}
+  .board ol {{ margin: 0; padding: 0; list-style: none; counter-reset: b; }}
+  .board li {{
+    display: flex; align-items: center; gap: 8px; padding: 6px 0;
+    border-top: 1px solid var(--hairline); font-size: 12.5px;
+  }}
+  .board li:first-child {{ border-top: none; }}
+  .board .rk {{
+    flex: none; width: 18px; height: 18px; border-radius: 5px; font-size: 10.5px;
+    display: grid; place-items: center; background: rgba(255,255,255,0.06); color: var(--muted);
+    font-weight: 650;
+  }}
+  .board li:nth-child(1) .rk {{ background: rgba(250,178,25,0.18); color: var(--warning); }}
+  .board li:nth-child(2) .rk, .board li:nth-child(3) .rk {{ background: rgba(57,135,229,0.18); color: var(--accent); }}
+  .board .bk {{ flex: 1; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+  .board .ct {{ font-variant-numeric: tabular-nums; font-weight: 650; color: var(--ink); }}
+  .board .none {{ font-size: 12px; color: var(--muted); line-height: 1.4; }}
   .rail.r {{ right: 0; align-items: flex-start; }}
   .sticker {{
     background: var(--surface); border: 1px solid var(--hairline-strong);
@@ -273,7 +295,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .sticker.b {{ transform: rotate(2.5deg); border-color: rgba(12,163,12,0.4); }}
   .sticker.c {{ transform: rotate(-1.5deg); border-color: rgba(250,178,25,0.4); }}
   .sticker.d {{ transform: rotate(3deg); border-color: rgba(208,59,59,0.35); }}
-  @media (min-width: 1560px) {{ .rail {{ display: flex; }} }}
+  @media (min-width: 1440px) {{ .rail {{ display: flex; }} }}
 
   @media (max-width: 640px) {{
     body {{ padding: 20px 14px 56px; }}
@@ -287,13 +309,12 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body data-updated="{updated_iso}" data-interval="{poll_interval}">
 
-<aside class="rail l" aria-hidden="true">
-  <div class="sticker a"><span class="em">🎯</span><span class="tx">Мы не угадываем. Мы считаем.</span>
-    <div class="sub">сигнал или ничего</div></div>
-  <div class="sticker b"><span class="em">⏳</span><span class="tx">Пропустить — тоже решение</span>
-    <div class="sub">нет входа — нет ставки</div></div>
-  <div class="sticker c"><span class="em">📐</span><span class="tx">Плоская ставка. Всегда.</span>
-    <div class="sub">банкролл важнее прогноза</div></div>
+<aside class="rail l">
+  <div class="board">
+    <h4>Где чаще всего находим вилку</h4>
+    <p class="board-sub">Конторы, которые дольше всех держат старую цену</p>
+    {top_books}
+  </div>
 </aside>
 
 <aside class="rail r" aria-hidden="true">
@@ -644,6 +665,22 @@ def _bankroll_block(stats: dict) -> str:
     ).replace(",", " ")
 
 
+def _top_books(rows) -> str:
+    """Leaderboard of the bookmakers where the entry most often survives."""
+    if not rows:
+        return ("<p class='none'>Пока пусто — рейтинг наберётся, "
+                "как только пойдут первые сигналы.</p>")
+    items = []
+    for i, r in enumerate(rows, 1):
+        live = f" <span style='color:var(--muted)'>({r['live_n']} live)</span>" if r["live_n"] else ""
+        items.append(
+            f"<li><span class='rk'>{i}</span>"
+            f"<span class='bk'>{html.escape(r['book'])}</span>"
+            f"<span class='ct'>{r['n']}</span>{live}</li>"
+        )
+    return "<ol>" + "".join(items) + "</ol>"
+
+
 def _live_table(rows) -> str:
     if not rows:
         return ('<p class="empty">Сейчас в идущих матчах конторы не расходятся сильнее '
@@ -801,6 +838,7 @@ def render_dashboard(summaries: list, quota: dict = None, live_rows: list = None
         cov_sports_word=_plural(cov["sports"], 'лига и дисциплина', 'лиги и дисциплины', 'лиг и дисциплин'),
         summaries_html=_summaries_html(summaries or []),
         live_table=_live_table(live_rows or []),
+        top_books=_top_books(storage.top_books(10)),
         stats_card=_stats_card(storage.alert_stats("prematch")),
         last_bets=_last_bets(storage.recent_bets(5, "prematch")),
         stats_live=_stats_card(storage.alert_stats("live")),
