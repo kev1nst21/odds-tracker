@@ -60,7 +60,10 @@ jobs:
           THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          SPIKE_THRESHOLD_PCT: "0.08"
+          # Keep in sync with config.py's default -- an env var here silently
+          # overrides it, and a stale 0.08 left the dashboard telling users
+          # "от 8%" while the code was meant to alert from 10%.
+          SPIKE_THRESHOLD_PCT: "0.10"
           RESULTS_CHECK_INTERVAL_HOURS: "3"
           POLL_INTERVAL_MINUTES: "30"
         run: python main.py
