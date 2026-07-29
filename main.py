@@ -53,20 +53,20 @@ def _fetch_oddspapi(now):
     """Esports + table tennis. Never allowed to break the run: if this provider
     is down or unpaid, the football/tennis pipeline must still complete."""
     if not ODDSPAPI_KEY:
-        return [], []
+        return []
     try:
         names_cache, tourneys_cache = _load_lookup_cache(now)
-        records, live, names, tourneys = oddspapi_client.collect(
+        records, names, tourneys = oddspapi_client.collect(
             on_error=_warn_sport_error,
             names_cache=names_cache,
             tournaments_cache=tourneys_cache,
         )
         if not names_cache:
             _save_lookup_cache(names, tourneys, now)
-        return records, live
+        return records
     except Exception as exc:  # noqa: BLE001 -- second provider is best-effort
         print(f"[main] OddsPapi provider failed, continuing without it: {exc}")
-        return [], []
+        return []
 
 
 def run_once():
@@ -79,13 +79,11 @@ def run_once():
 
     raw = odds_client.fetch_odds_for_sports(sport_keys, on_error=_warn_sport_error)
     records = odds_client.flatten_odds(raw)
-    live_records = odds_client.flatten_live(raw)
 
     # Esports + table tennis ride on a second provider but produce identical
     # records, so everything downstream treats them the same as football.
-    esports_records, esports_live = _fetch_oddspapi(now)
+    esports_records = _fetch_oddspapi(now)
     records += esports_records
-    live_records += esports_live
 
     spikes, movements = detector.detect(records, fetched_at)
     summaries = analytics.build_event_summaries(records, spikes, movements)
@@ -105,10 +103,7 @@ def run_once():
     # internally throttled to run at most once every RESULTS_CHECK_INTERVAL_HOURS.
     newly_resolved = results.check_pending_results()
 
-    live_rows = analytics.find_live_anomalies(live_records)
-    logged_live = sum(1 for r in live_rows if storage.save_live_alert(r, fetched_at))
-    path = dashboard.render_dashboard(summaries, quota=odds_client.LAST_QUOTA,
-                                      live_rows=live_rows)
+    path = dashboard.render_dashboard(summaries, quota=odds_client.LAST_QUOTA)
 
     actionable = sum(1 for s in summaries if s.get("alertable"))
     starred = sum(1 for s in summaries if s.get("stars", 0) >= 3)
@@ -117,8 +112,7 @@ def run_once():
         f"{len(esports_records)} esports/table-tennis lines via OddsPapi, "
         f"{len(records)} lines total, {len(summaries)} events moved 10%+, "
         f"{actionable} with an open entry, {starred} at 3 stars, "
-        f"{logged} prematch + {logged_live} live bets logged, "
-        f"{newly_resolved} resolved, dashboard -> {path}"
+        f"{logged} new bets logged, {newly_resolved} resolved, dashboard -> {path}"
     )
     return summaries
 

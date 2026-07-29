@@ -102,7 +102,6 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   h3.sub {{ font-size: 13px; font-weight: 600; color: var(--ink-2); margin: 26px 0 12px;
     padding-bottom: 8px; border-bottom: 1px solid var(--hairline); }}
   h3.sub:first-of-type {{ margin-top: 6px; }}
-  h3.sub.live::before {{ content: '🔴 '; }}
   .hs.green b {{ color: var(--good); }}
 
   .status {{ flex: 0 0 250px; }}
@@ -255,25 +254,27 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
      content. Wording is deliberately about patience, price and bankroll rather
      than "bet more": the entire point of the tool is to act on a rule instead
      of on impulse, and hype text on the wall would work against its owner. */
+  /* Left rail sits in the dead space beside the 1120px column. It is only
+     shown when the viewport is genuinely wide enough for it AND the column,
+     so it can never overlap the content. */
   .rail {{
-    position: fixed; top: 0; bottom: 0; width: 260px; pointer-events: none; z-index: 0;
-    display: none; flex-direction: column; justify-content: center; gap: 26px; padding: 24px;
+    position: fixed; top: 50%; transform: translateY(-50%); z-index: 0; display: none;
   }}
-  .rail.l {{ left: 0; align-items: flex-end; pointer-events: auto; }}
+  .rail.l {{ left: max(12px, calc(50% - 560px - 210px)); }}
   .board {{
-    background: var(--surface); border: 1px solid var(--hairline); border-radius: 14px;
-    padding: 16px 16px 12px; width: 212px; box-shadow: 0 12px 34px rgba(0,0,0,0.5);
+    background: var(--surface); border: 1px solid var(--hairline); border-radius: 12px;
+    padding: 12px 13px 9px; width: 186px; box-shadow: 0 10px 28px rgba(0,0,0,0.5);
   }}
-  .board h4 {{ margin: 0; font-size: 13px; font-weight: 650; letter-spacing: -0.01em; }}
-  .board-sub {{ margin: 4px 0 12px; font-size: 11.5px; color: var(--muted); line-height: 1.35; }}
+  .board h4 {{ margin: 0; font-size: 12px; font-weight: 650; letter-spacing: -0.01em; line-height: 1.25; }}
+  .board-sub {{ margin: 3px 0 9px; font-size: 11px; color: var(--muted); line-height: 1.3; }}
   .board ol {{ margin: 0; padding: 0; list-style: none; counter-reset: b; }}
   .board li {{
-    display: flex; align-items: center; gap: 8px; padding: 6px 0;
-    border-top: 1px solid var(--hairline); font-size: 12.5px;
+    display: flex; align-items: center; gap: 7px; padding: 4px 0;
+    border-top: 1px solid var(--hairline); font-size: 12px;
   }}
   .board li:first-child {{ border-top: none; }}
   .board .rk {{
-    flex: none; width: 18px; height: 18px; border-radius: 5px; font-size: 10.5px;
+    flex: none; width: 16px; height: 16px; border-radius: 4px; font-size: 10px;
     display: grid; place-items: center; background: rgba(255,255,255,0.06); color: var(--muted);
     font-weight: 650;
   }}
@@ -295,7 +296,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .sticker.b {{ transform: rotate(2.5deg); border-color: rgba(12,163,12,0.4); }}
   .sticker.c {{ transform: rotate(-1.5deg); border-color: rgba(250,178,25,0.4); }}
   .sticker.d {{ transform: rotate(3deg); border-color: rgba(208,59,59,0.35); }}
-  @media (min-width: 1440px) {{ .rail {{ display: flex; }} }}
+  @media (min-width: 1560px) {{ .rail {{ display: block; }} }}
 
   @media (max-width: 640px) {{
     body {{ padding: 20px 14px 56px; }}
@@ -317,20 +318,12 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   </div>
 </aside>
 
-<aside class="rail r" aria-hidden="true">
-  <div class="sticker c"><span class="em">💸</span><span class="tx">Цену делает не матч, а деньги</span>
-    <div class="sub">смотри, куда они пошли</div></div>
-  <div class="sticker a"><span class="em">⭐</span><span class="tx">Три звезды бьют интуицию</span>
-    <div class="sub">чем больше контор — тем вернее</div></div>
-  <div class="sticker d"><span class="em">🚫</span><span class="tx">Не отыгрывайся</span>
-    <div class="sub">рынок не должен тебе ничего</div></div>
-</aside>
 
 <div class="wrap">
   <header class="top">
     <div class="hero">
       <div class="mark" aria-hidden="true">
-        <svg viewBox="0 0 64 64" width="132" height="132" role="img">
+        <svg viewBox="0 0 64 64" width="104" height="104" role="img">
           <defs>
             <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
               <stop offset="0" stop-color="#3987e5"/><stop offset="1" stop-color="#16478a"/>
@@ -368,8 +361,6 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
           <div class="hs green"><b>{hero_open}</b><span>вход открыт сейчас</span></div>
           <div class="hs gold"><b>{hero_stars}</b><span>на три звезды</span></div>
         </div>
-        <p class="hero-note">{cov_cycles} {cov_cycles_word} рынка за сутки · {cov_sports} {cov_sports_word} ·
-        два независимых поставщика данных · проверка каждые {poll_interval} минут</p>
       </div>
 
       <div class="status">
@@ -418,28 +409,12 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   </section>
 
   <section>
-    <h2>🔴 Сводка по рынку LIVE</h2>
-    <p class="note">Матчи, которые <b>уже идут</b>. Ставок отсюда мы не делаем и в бота
-    это не уходит: в лайве цена двигается от голов, а не от денег, так что наша логика
-    там не работает. Но одна вещь в лайве говорящая — когда конторы <b>сильно разошлись
-    в цене</b> на один и тот же исход. Обычно это значит, что кто-то не успел
-    переставить линию после гола. Ниже такие расхождения от 25%.</p>
-    {live_table}
-  </section>
-
-  <section>
     <h2>Проверка сигналов</h2>
     <p class="note">Считается по ставкам, чьи матчи уже закончились, и всегда по
     <b>той цене, которую мы называли</b>. <b>CLV</b> — успели ли мы взять цену до того,
-    как её срезал весь рынок. Предматч и лайв считаются <b>раздельно</b>: это разные
-    стратегии, и смешивать их в одну цифру значит прятать, какая из них работает.
-    Статистика начата с чистого листа 29.07.2026.</p>
-    <h3 class="sub">Предматч — сводка по рынку</h3>
+    как её срезал весь рынок. Статистика начата с чистого листа 29.07.2026.</p>
     {stats_card}
     {last_bets}
-    <h3 class="sub live">Лайв — расхождение контор</h3>
-    {stats_live}
-    {last_bets_live}
   </section>
 
   <footer>
@@ -672,36 +647,12 @@ def _top_books(rows) -> str:
                 "как только пойдут первые сигналы.</p>")
     items = []
     for i, r in enumerate(rows, 1):
-        live = f" <span style='color:var(--muted)'>({r['live_n']} live)</span>" if r["live_n"] else ""
         items.append(
             f"<li><span class='rk'>{i}</span>"
             f"<span class='bk'>{html.escape(r['book'])}</span>"
-            f"<span class='ct'>{r['n']}</span>{live}</li>"
+            f"<span class='ct'>{r['n']}</span></li>"
         )
     return "<ol>" + "".join(items) + "</ol>"
-
-
-def _live_table(rows) -> str:
-    if not rows:
-        return ('<p class="empty">Сейчас в идущих матчах конторы не расходятся сильнее '
-                'чем на 25% — всё стоит ровно.</p>')
-    out = []
-    for r in rows:
-        event = f"{r['home_team']} — {r['away_team']}"
-        out.append(
-            f"<tr><td class='c-ev'>{html.escape(event)}"
-            f"<small>{html.escape(str(r.get('sport_key') or ''))}</small></td>"
-            f"<td class='c-out'>{html.escape(r['name'])}</td>"
-            f"<td class='c-move'><span class='new'>{r['low']:.2f}</span>"
-            f"<span class='arr'>…</span><span class='old'>{r['high']:.2f}</span></td>"
-            f"<td class='c-books'>{r['median']:.2f}</td>"
-            f"<td><span class='chip wait'>⚠️ {r['spread_pct']:.0f}%</span></td>"
-            f"<td class='c-bet'><span class='price'>{r['high']:.2f}</span>"
-            f"<small>{html.escape(r['outlier_book'])}</small></td></tr>"
-        )
-    head = ("<tr><th>Матч идёт</th><th>Исход</th><th>Разброс цен</th>"
-            "<th>Медиана</th><th>Расхождение</th><th>Выбивается</th></tr>")
-    return f"<div class='feed-wrap'><table class='feed'>{head}{''.join(out)}</table></div>"
 
 
 def _stats_card(stats: dict):
@@ -807,7 +758,7 @@ def _last_bets(bets, limit: int = 5) -> str:
             + "".join(items) + "</div>")
 
 
-def render_dashboard(summaries: list, quota: dict = None, live_rows: list = None):
+def render_dashboard(summaries: list, quota: dict = None):
     meta = storage.snapshot_meta()
     cov = storage.coverage_stats(24)
     if quota:
@@ -832,17 +783,10 @@ def render_dashboard(summaries: list, quota: dict = None, live_rows: list = None
         cov_books=cov["books"], cov_events=f"{cov['events']:,}".replace(',', ' '),
         cov_lines=f"{cov['lines']:,}".replace(',', ' '),
         cov_moves=f"{cov['moves']:,}".replace(',', ' '),
-        cov_cycles=cov["cycles"],
-        cov_cycles_word=_plural(cov["cycles"], 'срез', 'среза', 'срезов'),
-        cov_sports=cov["sports"],
-        cov_sports_word=_plural(cov["sports"], 'лига и дисциплина', 'лиги и дисциплины', 'лиг и дисциплин'),
         summaries_html=_summaries_html(summaries or []),
-        live_table=_live_table(live_rows or []),
         top_books=_top_books(storage.top_books(10)),
         stats_card=_stats_card(storage.alert_stats("prematch")),
         last_bets=_last_bets(storage.recent_bets(5, "prematch")),
-        stats_live=_stats_card(storage.alert_stats("live")),
-        last_bets_live=_last_bets(storage.recent_bets(5, "live")),
         countdown_js=COUNTDOWN_JS,
     )
     # git does not track empty directories, so a fresh CI checkout has no

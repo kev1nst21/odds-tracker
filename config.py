@@ -195,6 +195,9 @@ DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://kev1nst21.github.io/odds-tra
 # without cutting limits.
 FLAT_STAKE = float(os.getenv("FLAT_STAKE", "200"))
 
+# v5 (2026-07-29): third reset -- the live experiment was dropped entirely
+# (in-play disagreement turned out to be noise, not signal), so the counters
+# start clean again and only pre-match signals are ever recorded.
 # v4 (2026-07-29): second reset. v3 mixed pre-match and live bets into one
 # set of numbers and logged esports alerts that could never be graded (their
 # scores live on a different provider), so the win rate was meaningless.
@@ -205,5 +208,5 @@ FLAT_STAKE = float(os.getenv("FLAT_STAKE", "200"))
 # rows can't be re-scored meaningfully, so statistics start fresh from here and
 # every alert now records was-price, dropped-to price and the entry price we
 # recommended.
-DB_PATH = os.path.join(os.path.dirname(__file__), "data", "odds_history_v4.db")
+DB_PATH = os.path.join(os.path.dirname(__file__), "data", "odds_history_v5.db")
 DASHBOARD_PATH = os.path.join(os.path.dirname(__file__), "dashboard", "index.html")

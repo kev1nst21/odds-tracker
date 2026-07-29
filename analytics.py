@@ -55,7 +55,6 @@ from config import (
     ENTRY_MIN_GAP_PCT,
     EXCLUDE_DRAW,
     SPIKE_THRESHOLD_PCT,
-    LIVE_MIN_SPREAD_PCT,
 )
 
 _SHARP_PRIORITY = list(ASIAN_SHARP_BOOKMAKERS)
@@ -270,61 +269,6 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
         -((s["bet"] or {}).get("entry_gap_pct") or 0),
     ))
     return summaries
-
-
-def find_live_anomalies(records: list, min_spread_pct: float = None, limit: int = 25) -> list:
-    """Odd things happening in matches that are already under way.
-
-    These are NEVER bets. In-play prices move on what is happening on the pitch,
-    so the money-flow logic doesn't apply. What IS informative live is
-    DISAGREEMENT: when one bookmaker is offering 4.50 on an outcome the rest of
-    the market has at 2.10, somebody has not repriced -- usually a book that
-    missed a goal or a break of serve. That gap is the strange thing worth
-    looking at, and unlike a price move it needs no history to detect, just one
-    snapshot across several books.
-
-    Returns rows sorted by how wide the disagreement is.
-    """
-    min_spread_pct = LIVE_MIN_SPREAD_PCT if min_spread_pct is None else min_spread_pct
-    by_side = defaultdict(list)
-    for r in records:
-        if _usable(r):
-            by_side[(r["fixture_id"], r["outcome_id"])].append(r)
-
-    rows = []
-    for (fixture_id, side), group in by_side.items():
-        if len(group) < 3:
-            continue  # two books disagreeing is not yet a market
-        prices = sorted(float(x["price"]) for x in group)
-        low, high = prices[0], prices[-1]
-        if low <= 0:
-            continue
-        spread = (high / low - 1) * 100
-        if spread < min_spread_pct:
-            continue
-        # The outlier is the single book away from the pack; compare it with
-        # the median of the rest so one weird quote can't define "the market".
-        mid = prices[len(prices) // 2]
-        top = max(group, key=lambda x: float(x["price"]))
-        sample = group[0]
-        rows.append({
-            "fixture_id": fixture_id,
-            "sport_key": sample.get("sport_key"),
-            "start_time": sample.get("start_time"),
-            "home_team": sample.get("home_team"),
-            "away_team": sample.get("away_team"),
-            "side": side,
-            "name": _outcome_name(sample, side),
-            "low": low,
-            "high": high,
-            "median": mid,
-            "spread_pct": spread,
-            "outlier_book": top["bookmaker"],
-            "books_count": len(group),
-        })
-
-    rows.sort(key=lambda r: -r["spread_pct"])
-    return rows[:limit]
 
 
 def _verdict(bet, has_entry) -> str:

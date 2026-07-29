@@ -389,40 +389,6 @@ def alert_stats(kind: str = "prematch"):
         }
 
 
-def save_live_alert(row: dict, detected_at: str) -> bool:
-    """Log a live signal -- a bookmaker still offering a price the rest of the
-    in-play market has already moved away from. Kept in the same table as
-    pre-match bets but under kind='live', because the two have to be judged
-    separately: they are different strategies with different hit profiles, and
-    averaging them together would hide which one actually works."""
-    if not row.get("high"):
-        return False
-    with _conn() as conn:
-        cur = conn.execute(
-            """
-            INSERT OR IGNORE INTO tracked_alerts
-                (alert_type, kind, fixture_id, sport_key, start_time, home_team, away_team,
-                 outcome_id, outcome_name, stars, down_count, books_count,
-                 old_price, new_price, entry_price, entry_book,
-                 market_id, player_key, bookmaker, label, direction,
-                 alert_price, detected_at, resolved)
-            VALUES ('live', 'live', ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 'h2h', '-', ?, ?, 'down', ?, ?, 0)
-            """,
-            (
-                row["fixture_id"], row.get("sport_key"), row.get("start_time"),
-                row.get("home_team"), row.get("away_team"),
-                row["side"], row["name"],
-                row.get("books_count"), row.get("books_count"),
-                row.get("median"), row.get("median"),
-                row["high"], row["outlier_book"],
-                row["outlier_book"], row["name"],
-                row["high"], detected_at,
-            ),
-        )
-        conn.commit()
-        return cur.rowcount > 0
-
-
 def recent_bets(limit: int = 5, kind: str = "prematch"):
     """The last N bets we called, resolved or not. Unlike alert_stats()['recent']
     this deliberately includes pending ones -- right after a stats reset there
@@ -454,15 +420,14 @@ def top_books(limit: int = 10):
     with _conn() as conn:
         rows = conn.execute(
             """
-            SELECT entry_book AS book, COUNT(*) AS n,
-                   SUM(CASE WHEN kind='live' THEN 1 ELSE 0 END) AS live_n
+            SELECT entry_book AS book, COUNT(*) AS n
             FROM tracked_alerts
             WHERE entry_book IS NOT NULL AND entry_book <> ''
             GROUP BY entry_book ORDER BY n DESC, book ASC LIMIT ?
             """,
             (limit,),
         ).fetchall()
-        return [{"book": r["book"], "n": r["n"], "live_n": r["live_n"] or 0} for r in rows]
+        return [{"book": r["book"], "n": r["n"]} for r in rows]
 
 
 def coverage_stats(hours: int = 24):
