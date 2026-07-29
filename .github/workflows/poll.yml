@@ -58,6 +58,10 @@ jobs:
       - name: Run one poll cycle
         env:
           THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
+          # Second provider, esports + table tennis only. The secret already
+          # existed from the original OddsPapi build; the same key now carries
+          # the paid subscription, so nothing had to be re-issued.
+          ODDSPAPI_KEY: ${{ secrets.ODDSPAPI_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           # Keep in sync with config.py's default -- an env var here silently
