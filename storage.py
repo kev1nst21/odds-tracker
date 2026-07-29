@@ -11,7 +11,7 @@ import os
 import sqlite3
 from contextlib import contextmanager
 
-from config import DB_PATH
+from config import DB_PATH, FLAT_STAKE
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS odds_snapshots (
@@ -350,7 +350,22 @@ def alert_stats():
             ORDER BY resolved_at DESC LIMIT 20
             """
         ).fetchall()
+        # Flat-stake profit/loss over every graded bet, priced at the entry we
+        # actually recommended. A win returns stake x (odds - 1), a loss costs
+        # the stake. Bets graded 'n/a' are excluded rather than counted as
+        # pushes -- we don't know what they did.
+        graded = conn.execute(
+            "SELECT result, entry_price FROM tracked_alerts "
+            "WHERE resolved=1 AND result IN ('hit','miss') AND entry_price IS NOT NULL"
+        ).fetchall()
         clv_n = clv_row["clv_n"] or 0
+        profit = 0.0
+        for g in graded:
+            if g["result"] == "hit":
+                profit += FLAT_STAKE * (g["entry_price"] - 1)
+            else:
+                profit -= FLAT_STAKE
+        staked = FLAT_STAKE * len(graded)
         return {
             "total": total,
             "resolved": resolved,
@@ -361,8 +376,32 @@ def alert_stats():
             "avg_clv_pct": clv_row["avg_clv"],
             "clv_continued_rate": (clv_row["clv_wins"] / clv_n * 100) if clv_n else None,
             "clv_n": clv_n,
+            "stake": FLAT_STAKE,
+            "graded_n": len(graded),
+            "staked": staked,
+            "profit": profit,
+            "roi_pct": (profit / staked * 100) if staked else None,
             "recent": recent,
         }
+
+
+def recent_bets(limit: int = 5):
+    """The last N bets we called, resolved or not. Unlike alert_stats()['recent']
+    this deliberately includes pending ones -- right after a stats reset there
+    are no finished matches yet, and a panel that renders empty for hours looks
+    broken rather than new."""
+    with _conn() as conn:
+        return conn.execute(
+            """
+            SELECT fixture_id, home_team, away_team, outcome_name, stars,
+                   down_count, books_count, old_price, new_price,
+                   entry_price, entry_book, start_time, detected_at,
+                   resolved, result, clv_pct, resolved_at
+            FROM tracked_alerts
+            ORDER BY detected_at DESC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
 
 
 def snapshot_meta():

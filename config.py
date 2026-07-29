@@ -154,6 +154,12 @@ POLL_INTERVAL_MINUTES = int(os.getenv("POLL_INTERVAL_MINUTES", "30"))
 # Public URL of the dashboard, linked at the bottom of each Telegram digest.
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://kev1nst21.github.io/odds-tracker/")
 
+# Flat stake used for the "what would the balance be" line on the dashboard.
+# A flat stake is the only honest way to present this: varying the stake would
+# let the number be tuned after the fact. $200 is a size most bookmakers accept
+# without cutting limits.
+FLAT_STAKE = float(os.getenv("FLAT_STAKE", "200"))
+
 # v3 (2026-07-29): clean slate. The earlier database held alerts recorded under
 # the old per-line logic, where the stored "alert price" was whatever the book
 # that spiked was showing -- not the price we would actually have bet at. Those
