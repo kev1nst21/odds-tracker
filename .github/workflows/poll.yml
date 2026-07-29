@@ -1,12 +1,18 @@
-name: Poll odds every 30 minutes
+name: Poll odds
 
-# 2026-07-29: switched from OddsPapi (free tier hard-capped at 250
-# requests/month total -- nowhere near enough) to The Odds API's paid "20K"
-# plan (20,000 credits/month, $30/mo, all bookmakers included). Quota math
-# (see README.md "Квота" section): odds-polling every 30 min x ~9 sport keys
-# x 1 credit/call =~ 13,000 credits/mo, + results/CLV checking (throttled to
-# once every RESULTS_CHECK_INTERVAL_HOURS inside results.py itself) =~ 2,200
-# credits/mo -- leaves headroom under the 20K/mo budget.
+# Cadence lives in cadence.json, NOT here. GitHub will not schedule anything
+# more often than every 5 minutes and runs even that late routinely, so a cron
+# of "*/3" is not an option. Instead this workflow fires every 30 minutes and
+# runner.py does its own clock-anchored loop inside the window -- which is how
+# the 3 / 5 / 10-minute experiment gets real 3-minute polls. Changing the
+# cadence means editing cadence.json; this file stays untouched.
+#
+# Quota math against The Odds API's 20K/month plan (~9 sport keys x 1 credit
+# per poll): 30 min = ~13,000/mo. The experiment costs roughly 4,300 credits
+# for the 3-minute day, 2,600 for the 5-minute day and 1,300 for the
+# 10-minute day, so it fits -- but only just, which is why runner.py stops
+# polling when the balance nears QUOTA_RESERVE_CREDITS instead of running the
+# account flat mid-month.
 on:
   schedule:
     - cron: "*/30 * * * *"
@@ -20,8 +26,9 @@ permissions:
   pages: write
   id-token: write
 
-# If a run somehow takes longer than the 30-minute schedule, don't let runs
-# pile up on top of each other -- newest scheduled run wins.
+# Runs must never pile up: the loop writes to a SQLite file that is restored
+# from and saved to the CI cache, and two writers would corrupt the history.
+# runner.py finishes before the next slot on its own, so this is a backstop.
 concurrency:
   group: poll-odds
   cancel-in-progress: true
@@ -29,7 +36,9 @@ concurrency:
 jobs:
   poll:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    # The loop stops itself 2.5 minutes before the next scheduled run; this is
+    # only a hard backstop in case a single poll hangs on a slow API call.
+    timeout-minutes: 32
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -46,16 +55,22 @@ jobs:
       # snapshot forever (spike detection needs the previous run's prices,
       # so this matters). Keying on the run id makes every run's save unique;
       # restore-keys falls back to the most recent previous run's cache.
+      # 2026-07-29: the cache prefix was bumped to -v2- once, deliberately, to
+      # start the counters from zero at the moment the strategy split and the
+      # 3-minute experiment went live. Everything logged before that was under
+      # different mechanics and would have made the first week's numbers
+      # meaningless. This is the LAST reset: new columns now arrive through
+      # storage._migrate() instead of by throwing the history away.
       - name: Restore odds history DB
         uses: actions/cache@v4
         with:
           path: data
-          key: odds-history-db-${{ github.run_id }}
-          restore-keys: odds-history-db-
+          key: odds-history-v2-${{ github.run_id }}
+          restore-keys: odds-history-v2-
 
       - run: pip install -r requirements.txt
 
-      - name: Run one poll cycle
+      - name: Poll the market for this window
         env:
           THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
           # Second provider, esports + table tennis only. The secret already
@@ -69,8 +84,11 @@ jobs:
           # "от 8%" while the code was meant to alert from 10%.
           SPIKE_THRESHOLD_PCT: "0.10"
           RESULTS_CHECK_INTERVAL_HOURS: "3"
-          POLL_INTERVAL_MINUTES: "30"
-        run: python main.py
+          # Deliberately NOT setting POLL_INTERVAL_MINUTES: setting it here
+          # would override cadence.json and reintroduce exactly the drift
+          # between advertised and actual cadence that this design removes.
+          PUBLISH_INTERVAL_MINUTES: "30"
+        run: python runner.py
 
       # Publish the freshly-rendered dashboard/index.html to GitHub Pages.
       - uses: actions/configure-pages@v5
