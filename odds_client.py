@@ -171,12 +171,28 @@ def flatten_odds(raw_events: list) -> list:
     requested) but is kept as a constant '-' for schema compatibility with
     the rest of the pipeline (detector/storage key on 5 fields).
     """
+    return _flatten(raw_events, want_live=False)
+
+
+def flatten_live(raw_events: list) -> list:
+    """The in-play fixtures flatten_odds() throws away.
+
+    These never generate bets -- their prices react to goals, not to money --
+    but they are worth showing in a clearly separated observation panel, since
+    a bookmaker that hasn't repriced after a goal shows up as a wild
+    disagreement with the rest of the market. Same record shape as the
+    pre-match ones so the same helpers work on them.
+    """
+    return _flatten(raw_events, want_live=True)
+
+
+def _flatten(raw_events: list, want_live: bool = False) -> list:
     records = []
     skipped_live = 0
     for event in raw_events:
         fixture_id = event.get("id")
         start_time = event.get("commence_time")
-        if not _is_prematch(start_time):
+        if _is_prematch(start_time) == want_live:
             skipped_live += 1
             continue
         home_team = event.get("home_team")
@@ -209,6 +225,6 @@ def flatten_odds(raw_events: list) -> list:
                         "price": float(price),
                         "label": label,
                     })
-    if skipped_live:
+    if skipped_live and not want_live:
         print(f"[odds_client] skipped {skipped_live} in-play event(s) -- pre-match only")
     return records

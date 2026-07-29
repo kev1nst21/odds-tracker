@@ -184,12 +184,22 @@ def flatten_odds(fixtures: list, names_by_sport: dict, sport_keys: dict = None) 
     outcomes map straight onto home/away, which is exactly what the rest of the
     pipeline already understands.
     """
+    return _flatten(fixtures, names_by_sport, sport_keys, want_live=False)
+
+
+def flatten_live(fixtures: list, names_by_sport: dict, sport_keys: dict = None) -> list:
+    """In-play fixtures only -- observation panel, never signals. See
+    odds_client.flatten_live() for why."""
+    return _flatten(fixtures, names_by_sport, sport_keys, want_live=True)
+
+
+def _flatten(fixtures, names_by_sport, sport_keys=None, want_live=False):
     sport_keys = sport_keys or ODDSPAPI_SPORTS
     records = []
     skipped_live = 0
     for fx in fixtures:
         start_time = fx.get("startTime")
-        if not _is_prematch(start_time):
+        if _is_prematch(start_time) == want_live:
             skipped_live += 1
             continue
 
@@ -232,7 +242,7 @@ def flatten_odds(fixtures: list, names_by_sport: dict, sport_keys: dict = None) 
                         "label": f"{home} vs {away}: {name}",
                     })
                     break  # one price per outcome; alt lines are skipped above
-    if skipped_live:
+    if skipped_live and not want_live:
         print(f"[oddspapi] skipped {skipped_live} in-play fixture(s) -- pre-match only")
     return records
 
@@ -240,8 +250,8 @@ def flatten_odds(fixtures: list, names_by_sport: dict, sport_keys: dict = None) 
 def collect(on_error=None, names_cache: dict = None, tournaments_cache: dict = None) -> tuple:
     """Full cycle for every configured sport.
 
-    Returns (records, names_by_sport, tournaments_by_sport) so the caller can
-    persist the two lookup tables and skip re-fetching them next run.
+    Returns (records, live_records, names_by_sport, tournaments_by_sport) so the
+    caller can persist the two lookup tables and skip re-fetching them next run.
     """
     names_cache = names_cache or {}
     tournaments_cache = tournaments_cache or {}
@@ -263,4 +273,5 @@ def collect(on_error=None, names_cache: dict = None, tournaments_cache: dict = N
             all_fixtures.extend(fetch_odds(tourneys, on_error=on_error))
 
     records = flatten_odds(all_fixtures, names_by_sport)
-    return records, names_by_sport, tourneys_by_sport
+    live = flatten_live(all_fixtures, names_by_sport)
+    return records, live, names_by_sport, tourneys_by_sport

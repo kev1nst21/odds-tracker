@@ -388,6 +388,16 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   </section>
 
   <section>
+    <h2>🔴 Сводка по рынку LIVE</h2>
+    <p class="note">Матчи, которые <b>уже идут</b>. Ставок отсюда мы не делаем и в бота
+    это не уходит: в лайве цена двигается от голов, а не от денег, так что наша логика
+    там не работает. Но одна вещь в лайве говорящая — когда конторы <b>сильно разошлись
+    в цене</b> на один и тот же исход. Обычно это значит, что кто-то не успел
+    переставить линию после гола. Ниже такие расхождения от 25%.</p>
+    {live_table}
+  </section>
+
+  <section>
     <h2>Проверка сигналов</h2>
     <p class="note">Считается по ставкам, чьи матчи уже закончились, и всегда по
     <b>той цене, которую мы называли</b>. <b>CLV</b> — успели ли мы взять цену до того,
@@ -619,6 +629,29 @@ def _bankroll_block(stats: dict) -> str:
     ).replace(",", " ")
 
 
+def _live_table(rows) -> str:
+    if not rows:
+        return ('<p class="empty">Сейчас в идущих матчах конторы не расходятся сильнее '
+                'чем на 25% — всё стоит ровно.</p>')
+    out = []
+    for r in rows:
+        event = f"{r['home_team']} — {r['away_team']}"
+        out.append(
+            f"<tr><td class='c-ev'>{html.escape(event)}"
+            f"<small>{html.escape(str(r.get('sport_key') or ''))}</small></td>"
+            f"<td class='c-out'>{html.escape(r['name'])}</td>"
+            f"<td class='c-move'><span class='new'>{r['low']:.2f}</span>"
+            f"<span class='arr'>…</span><span class='old'>{r['high']:.2f}</span></td>"
+            f"<td class='c-books'>{r['median']:.2f}</td>"
+            f"<td><span class='chip wait'>⚠️ {r['spread_pct']:.0f}%</span></td>"
+            f"<td class='c-bet'><span class='price'>{r['high']:.2f}</span>"
+            f"<small>{html.escape(r['outlier_book'])}</small></td></tr>"
+        )
+    head = ("<tr><th>Матч идёт</th><th>Исход</th><th>Разброс цен</th>"
+            "<th>Медиана</th><th>Расхождение</th><th>Выбивается</th></tr>")
+    return f"<div class='feed-wrap'><table class='feed'>{head}{''.join(out)}</table></div>"
+
+
 def _stats_card(stats: dict):
     win_rate = stats["win_rate"]
     win_rate_html = f"{win_rate:.0f}%" if win_rate is not None else "—"
@@ -722,7 +755,7 @@ def _last_bets(bets, limit: int = 5) -> str:
             + "".join(items) + "</div>")
 
 
-def render_dashboard(summaries: list, quota: dict = None):
+def render_dashboard(summaries: list, quota: dict = None, live_rows: list = None):
     meta = storage.snapshot_meta()
     if quota:
         meta["quota_used"] = quota.get("used")
@@ -746,6 +779,7 @@ def render_dashboard(summaries: list, quota: dict = None):
         hero_stars=sum(1 for s in (summaries or []) if s.get("stars", 0) >= 3),
         hero_books=len(meta.get("bookmakers") or []),
         summaries_html=_summaries_html(summaries or []),
+        live_table=_live_table(live_rows or []),
         stats_card=_stats_card(storage.alert_stats()),
         last_bets=_last_bets(storage.recent_bets(5)),
         countdown_js=COUNTDOWN_JS,
