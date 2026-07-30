@@ -129,7 +129,11 @@ EXCHANGE_BOOKMAKERS = ["betfair_ex_eu", "betfair_ex_uk", "betfair_ex_au", "match
 # Long-shot outcomes (e.g. 26.00) move several percent on rounding alone, so an
 # 8% "spike" there is meaningless. Lines priced above this are ignored for
 # signals -- nobody is acting on informed money at 30-to-1 anyway.
-MAX_SIGNAL_PRICE = float(os.getenv("MAX_SIGNAL_PRICE", "12.0"))
+# 2026-07-30: lowered from 12.0. A live signal recommended backing an 11.00
+# outsider because it had "dropped" from 12.00 -- technically a move, but at
+# those odds the price swings on rounding and nobody is loading informed money
+# onto a 12-to-1 shot anyway.
+MAX_SIGNAL_PRICE = float(os.getenv("MAX_SIGNAL_PRICE", "8.0"))
 
 # A decimal price at or below this is not a real market -- 1.00 pays nothing
 # back, and anything under ~1.05 is a settled or suspended line rather than a
@@ -171,6 +175,48 @@ ODDSPAPI_SPORT_KEYS = {"esports_cs2", "esports_dota2", "esports_lol", "table_ten
 # only if its price is at least this much above where the books that DID move
 # have settled. Anything tighter is not a real entry, just rounding.
 ENTRY_MIN_GAP_PCT = float(os.getenv("ENTRY_MIN_GAP_PCT", "3.0"))
+
+# How much of the drop the entry has to give back, in percent of the whole
+# move. THIS IS THE RULE THAT MAKES A SIGNAL MEAN WHAT IT SAYS.
+#
+# Found live 2026-07-30 on Furia Esports - Keyd Stars. One bookmaker had Keyd
+# Stars at 3.20, corrected itself to 1.73, and the only other book on that
+# fixture was sitting at 1.87 -- where it had been all along. The old code
+# only asked "is the entry at least 3% above where the market went", 1.87 is
+# 8% above 1.73, so it happily announced "был 3.20, ставим за 1.87". Nonsense:
+# 3.20 was never a price anyone could have taken, and 1.87 gives back barely a
+# tenth of the supposed move.
+#
+# The user's own logic is the fix -- "если коэффициент был 3, ставим за 3".
+# So the entry now has to recover at least half the distance between the old
+# price and the new one. Take the Keyd Stars numbers: the entry would have had
+# to be 2.46 or better, and 1.87 is thrown out.
+ENTRY_MIN_CAPTURE_PCT = float(os.getenv("ENTRY_MIN_CAPTURE_PCT", "50.0"))
+
+# ...and nothing priced far ABOVE where the market was before the move counts
+# either. A bookmaker offering more than the pre-drop price is not a slow
+# bookmaker, it is a stale or mis-keyed line, and those get voided rather than
+# paid. A little headroom is allowed because bookmakers genuinely disagree.
+ENTRY_MAX_OVER_OLD_PCT = float(os.getenv("ENTRY_MAX_OVER_OLD_PCT", "10.0"))
+
+# How many bookmakers must be quoting an outcome before a move in it counts as
+# a market move at all.
+#
+# Same incident: that esports fixture was priced by exactly TWO bookmakers, so
+# "просело у 1 из 2" was arithmetically true and completely meaningless. With
+# two quotes there is no consensus for anyone to lag behind -- one of them
+# fixing a typo is indistinguishable from money arriving. Breadth is the whole
+# confidence signal in this product, and breadth needs a crowd.
+#
+# Consequence worth knowing: esports fixtures that only two of the four
+# OddsPapi books cover will now produce no signal. That is the correct
+# outcome. No signal beats a fake one.
+MIN_MARKET_BOOKS = int(os.getenv("MIN_MARKET_BOOKS", "4"))
+
+# A single quote further than this from the median of all quotes on the same
+# outcome is treated as broken rather than as an opinion. Bookmakers disagree
+# by 10-20%; they do not disagree by 70%.
+OUTLIER_MAX_DEVIATION_PCT = float(os.getenv("OUTLIER_MAX_DEVIATION_PCT", "45.0"))
 
 # The draw is never bet (user decision, 2026-07-29) -- only the two match
 # winners are actionable. Draw prices are still FETCHED and still feed the

@@ -59,7 +59,38 @@ from config import (
     SAFE_TRIGGER_PRICE,
     SAFE_TARGET_MIN,
     SAFE_TARGET_MAX,
+    ENTRY_MIN_CAPTURE_PCT,
+    ENTRY_MAX_OVER_OLD_PCT,
+    MIN_MARKET_BOOKS,
+    OUTLIER_MAX_DEVIATION_PCT,
 )
+
+
+def _median(values):
+    xs = sorted(v for v in values if v is not None)
+    if not xs:
+        return None
+    mid = len(xs) // 2
+    return xs[mid] if len(xs) % 2 else (xs[mid - 1] + xs[mid]) / 2.0
+
+
+def _drop_outliers(prices_by_book: dict) -> dict:
+    """Throw away quotes that are too far from the rest of the market.
+
+    Bookmakers disagree by 10-20%. A quote 70% away from every other book is
+    not a disagreement, it is a stale or mis-keyed line -- and those are
+    exactly what produced the "был 3.20, просел до 1.73" nonsense: one book
+    carrying a wrong number, then correcting it, looked identical to money
+    arriving. With fewer than three quotes there is no market to compare
+    against, so nothing is trimmed.
+    """
+    if len(prices_by_book) < 3:
+        return prices_by_book
+    med = _median(prices_by_book.values())
+    if not med:
+        return prices_by_book
+    limit = OUTLIER_MAX_DEVIATION_PCT / 100.0
+    return {b: p for b, p in prices_by_book.items() if abs(p - med) / med <= limit}
 
 _SHARP_PRIORITY = list(ASIAN_SHARP_BOOKMAKERS)
 _SIDE_ORDER = {"home": 0, "draw": 1, "away": 2}
@@ -263,8 +294,17 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
 
         outcomes = []
         for side, side_rows in by_side.items():
-            prices_by_book = {r["bookmaker"].lower(): float(r["price"]) for r in side_rows}
+            prices_by_book = _drop_outliers(
+                {r["bookmaker"].lower(): float(r["price"]) for r in side_rows}
+            )
+            if not prices_by_book:
+                continue
             prices = list(prices_by_book.values())
+            # Breadth is this product's entire confidence signal, and breadth
+            # needs a crowd. Two bookmakers cannot form a consensus for a third
+            # to lag behind, so a "move" there is unreadable -- see
+            # MIN_MARKET_BOOKS in config.py for the case that proved it.
+            thin_market = len(prices) < MIN_MARKET_BOOKS
 
             move_list = moves.get((fixture_id, side)) or []
             # Belt and braces on top of the shared price filter: only count a
@@ -279,21 +319,35 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
             old_price = new_price = drop_pct = None
             entries = []
             if dropped:
-                # "Было" = the best price on offer before money arrived; "стало"
-                # = where the books that moved have settled. Using max(prev) and
-                # min(current) frames the move the way it's actually acted on:
-                # the widest gap between the old price and the new consensus.
-                old_price = max(m["prev_price"] for m in dropped)
-                new_price = min(m["price"] for m in dropped)
-                if old_price:
-                    drop_pct = (new_price - old_price) / old_price * 100
+                # MEDIANS, not max-of-old and min-of-new.
+                #
+                # The old code took the highest pre-drop price across every
+                # book that moved and the lowest post-drop price across every
+                # book that moved -- two numbers that generally come from two
+                # DIFFERENT bookmakers. That manufactures a drop nobody
+                # experienced: one book carrying a stale 3.20 alongside a
+                # market at 1.90 turned an ordinary correction into a
+                # headline "-46%". Medians describe what actually happened to
+                # a typical bookmaker, and one broken quote cannot move them.
+                old_price = _median([m["prev_price"] for m in dropped])
+                new_price = _median([m["price"] for m in dropped])
+                drop_pct = _median([m["pct_change"] for m in dropped]) * 100
 
-                # The entry: books that have NOT moved and still price this
-                # outcome meaningfully above where the market went.
-                threshold = new_price * (1 + ENTRY_MIN_GAP_PCT / 100.0)
+                # The entry has to be worth taking, which means two things.
+                # It must beat where the market went by more than rounding
+                # (ENTRY_MIN_GAP_PCT), AND it must give back a real share of
+                # the move (ENTRY_MIN_CAPTURE_PCT) -- otherwise we would be
+                # announcing "был 3.20" and sending you to bet 1.87. It also
+                # must not sit far above the pre-drop price: a book offering
+                # more than the market ever showed is broken, not slow.
+                floor = max(
+                    new_price * (1 + ENTRY_MIN_GAP_PCT / 100.0),
+                    new_price + (old_price - new_price) * (ENTRY_MIN_CAPTURE_PCT / 100.0),
+                )
+                ceiling = old_price * (1 + ENTRY_MAX_OVER_OLD_PCT / 100.0)
                 entries = sorted(
                     ((b, p) for b, p in prices_by_book.items()
-                     if b not in down_books and p >= threshold),
+                     if b not in down_books and floor <= p <= ceiling),
                     key=lambda bp: -bp[1],
                 )
 
@@ -312,6 +366,7 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
                 "sharp_moved": sharp_down,
                 "stars": _stars(down_books, sharp_down),
                 "spiked": (fixture_id, side) in spiked_sides,
+                "thin_market": thin_market,
                 "entries": entries[:3],
                 "entry_price": entries[0][1] if entries else None,
                 "entry_book": entries[0][0] if entries else None,
@@ -327,7 +382,11 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
 
         # The bet is on the side money went INTO. Never on the side that merely
         # drifted up as a mechanical consequence -- see the module docstring.
-        shortening = [o for o in outcomes if o["down_count"] > 0]
+        # A move in a two-bookmaker market is not evidence of anything -- see
+        # MIN_MARKET_BOOKS. Those outcomes are excluded from being picked as
+        # the bet rather than merely down-starred, because a one-star signal
+        # still gets sent and still gets counted.
+        shortening = [o for o in outcomes if o["down_count"] > 0 and not o["thin_market"]]
         bet = None
         if shortening:
             bet = max(shortening, key=lambda o: (o["spiked"], o["down_count"],

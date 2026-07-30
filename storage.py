@@ -496,22 +496,46 @@ def alert_stats(kind: str = "prematch", strategy: str = "aggressive"):
         }
 
 
-def recent_bets(limit: int = 5, kind: str = "prematch"):
+def recent_bets(limit: int = 5, kind: str = "prematch", strategy: str = None):
     """The last N bets we called, resolved or not. Unlike alert_stats()['recent']
     this deliberately includes pending ones -- right after a stats reset there
     are no finished matches yet, and a panel that renders empty for hours looks
     broken rather than new."""
+    sf, sp = _strategy_clause(strategy)
+    with _conn() as conn:
+        return conn.execute(
+            "SELECT fixture_id, home_team, away_team, outcome_name, stars, "
+            "       down_count, books_count, old_price, new_price, "
+            "       entry_price, entry_book, start_time, detected_at, "
+            "       resolved, result, clv_pct, resolved_at "
+            f"FROM tracked_alerts WHERE kind=?{sf} "
+            "ORDER BY detected_at DESC LIMIT ?",
+            (kind,) + sp + (limit,),
+        ).fetchall()
+
+
+def active_signals(limit: int = 40, kind: str = "prematch"):
+    """Signals whose match hasn't kicked off yet -- the ones still live.
+
+    The feed on the site shows what moved in the LAST poll, which is a
+    three-minute window and is empty most of the time. That made the page look
+    dead while several logged bets were sitting there waiting for their
+    matches, which is the opposite of the truth. This is the list a reader
+    actually means by "какие сигналы сейчас живые".
+    """
+    now = datetime.now(timezone.utc).isoformat()
     with _conn() as conn:
         return conn.execute(
             """
-            SELECT fixture_id, home_team, away_team, outcome_name, stars,
-                   down_count, books_count, old_price, new_price,
-                   entry_price, entry_book, start_time, detected_at,
-                   resolved, result, clv_pct, resolved_at
-            FROM tracked_alerts WHERE kind=?
-            ORDER BY detected_at DESC LIMIT ?
+            SELECT fixture_id, sport_key, home_team, away_team, outcome_name, stars,
+                   down_count, books_count, old_price, new_price, entry_price,
+                   entry_book, start_time, detected_at, strategy,
+                   safe_market, safe_pick, safe_price
+            FROM tracked_alerts
+            WHERE kind=? AND resolved=0 AND start_time IS NOT NULL AND start_time > ?
+            ORDER BY start_time ASC LIMIT ?
             """,
-            (kind, limit),
+            (kind, now, limit),
         ).fetchall()
 
 

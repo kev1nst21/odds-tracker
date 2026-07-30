@@ -216,6 +216,49 @@ def _ticker(summaries: list) -> str:
 # statistics
 # --------------------------------------------------------------------------
 
+def _active_signals(rows) -> str:
+    """Signals whose match hasn't started yet.
+
+    Added 2026-07-30 because the page genuinely misled: the feed above shows
+    only what moved in the LAST poll -- a three-minute window that is empty
+    most of the time -- so the site looked dead while several logged bets were
+    sitting there waiting to play. Those are two different questions ("что
+    шевельнулось только что" vs "на что мы сейчас стоим") and they now get two
+    different blocks.
+    """
+    if not rows:
+        return ("<p class='empty small'>Открытых ставок нет — все сигналы уже сыграли "
+                "либо новых пока не было.</p>")
+    items = []
+    for r in rows:
+        home, away = r["home_team"], r["away_team"]
+        event = f"{home} — {away}" if home and away else str(r["fixture_id"])
+        entry = f"{r['entry_price']:.2f}" if r["entry_price"] else "—"
+        old_p = f"{r['old_price']:.2f}" if r["old_price"] else "—"
+        new_p = f"{r['new_price']:.2f}" if r["new_price"] else "—"
+        tag = ("<span class='tag opt'>ОПТИМАЛЬНАЯ</span>"
+               if r["strategy"] == "optimal" else "<span class='tag agg'>АГРЕССИВНАЯ</span>")
+        safe = ""
+        if r["safe_pick"]:
+            price = f" {r['safe_price']:.2f}" if r["safe_price"] else ""
+            safe = f"<span class='tag safe'>🛡{html.escape(str(r['safe_pick']))[:34]}{price}</span>"
+        items.append(
+            f"<tr class='row'><td class='c-stars'>{'★' * (r['stars'] or 0)}</td>"
+            f"<td class='c-ev'><b>{html.escape(event)}</b>"
+            f"<small>старт {_fmt_start(r['start_time'])} UTC</small></td>"
+            f"<td class='c-out'>{html.escape(r['outcome_name'] or '')}"
+            f"<div class='tags'>{tag}{safe}</div></td>"
+            f"<td class='c-move'><span class='old'>{old_p}</span><span class='arr'>→</span>"
+            f"<span class='new'>{new_p}</span></td>"
+            f"<td class='c-books'>{r['down_count'] or 0}<span class='of'>/{r['books_count'] or 0}</span></td>"
+            f"<td class='c-bet'><span class='price'>{entry}</span>"
+            f"<small>{html.escape(r['entry_book'] or '')}</small></td></tr>"
+        )
+    return ("<div class='feed-wrap'><table class='feed'>"
+            "<tr><th></th><th>Событие</th><th>Ставим на</th><th>Был → стал</th>"
+            "<th>Контор</th><th>Взяли по</th></tr>" + "".join(items) + "</table></div>")
+
+
 def _bankroll_block(stats: dict) -> str:
     """Plain-language flat-stake result. Percentages are easy to misread; a
     balance in dollars is not."""
@@ -244,7 +287,37 @@ def _bankroll_block(stats: dict) -> str:
     ).replace(",", " ")
 
 
-def _strategy_card(stats: dict, title: str, subtitle: str, cls: str) -> str:
+def _mini_signals(rows) -> str:
+    """The last few signals in a bucket, shown when the count is clicked.
+
+    A total on its own is not checkable. Being able to open it and see the
+    actual events behind it -- with the price we named and what happened --
+    is what turns a number into something a reader can argue with.
+    """
+    if not rows:
+        return "<p class='none'>В этой стратегии сигналов пока нет.</p>"
+    items = []
+    for r in rows:
+        home, away = r["home_team"], r["away_team"]
+        event = f"{home} — {away}" if home and away else str(r["fixture_id"])
+        entry = f"{r['entry_price']:.2f}" if r["entry_price"] else "—"
+        old_p = f"{r['old_price']:.2f}" if r["old_price"] else "—"
+        new_p = f"{r['new_price']:.2f}" if r["new_price"] else "—"
+        if r["resolved"]:
+            st = {"hit": "<span class='hit'>✅ зашла</span>",
+                  "miss": "<span class='miss'>❌ не зашла</span>"}.get(
+                      r["result"], "<span class='pending'>— н/д</span>")
+        else:
+            st = "<span class='pending'>⏳ ждём</span>"
+        items.append(
+            f"<li><span class='ms-ev'><b>{html.escape(event)}</b>"
+            f"<small>{html.escape(r['outcome_name'] or '')} · {old_p} → {new_p} · "
+            f"взяли {entry} у {html.escape(r['entry_book'] or '—')}</small></span>{st}</li>"
+        )
+    return "<ul class='mini'>" + "".join(items) + "</ul>"
+
+
+def _strategy_card(stats: dict, title: str, subtitle: str, cls: str, recent=None) -> str:
     win_rate = stats["win_rate"]
     win_rate_html = f"{win_rate:.0f}%" if win_rate is not None else "—"
     avg_clv = stats.get("avg_clv_pct")
@@ -256,11 +329,17 @@ def _strategy_card(stats: dict, title: str, subtitle: str, cls: str) -> str:
         <p>{subtitle}</p>
       </div>
       <div class="stat-row">
-        <div class="stat"><b>{stats['total']}</b><span>сигналов</span></div>
+        <div class="stat"><button class="stat-btn" type="button" data-open="sig-{cls}"
+             aria-expanded="false" aria-controls="sig-{cls}"
+             title="Показать последние сигналы">{stats['total']}</button><span>сигналов ▾</span></div>
         <div class="stat"><b>{stats['resolved']}</b><span>проверено</span></div>
         <div class="stat"><b>{stats['pending']}</b><span>ждут матча</span></div>
         <div class="stat"><b>{win_rate_html}</b><span>заходимость</span></div>
         <div class="stat"><b>{avg_clv_html}</b><span>средний CLV</span></div>
+      </div>
+      <div class="sig-list" id="sig-{cls}" hidden>
+        <div class="sig-cap">Последние сигналы этой стратегии</div>
+        {_mini_signals(recent)}
       </div>
       {_bankroll_block(stats)}
     </div>
@@ -472,17 +551,19 @@ body::after{
 @keyframes slide{to{transform:translateX(-50%)}}
 
 /* ----------------------------------------------------------------- hero */
-.hero{padding:54px 0 26px;display:grid;grid-template-columns:1.15fr .85fr;gap:30px;align-items:center}
-.logo{width:112px;height:112px;filter:drop-shadow(0 10px 30px rgba(200,255,46,.22))}
+.hero{padding:40px 0 22px;display:grid;grid-template-columns:1.15fr .85fr;gap:30px;align-items:center}
+.logo{width:84px;height:84px;filter:drop-shadow(0 10px 30px rgba(200,255,46,.22))}
+/* Deliberately smaller than the first version: at 74px the headline filled
+   most of a laptop screen and read as shouting rather than as a title. */
 .hero h1{
-  font-family:Unbounded,sans-serif;font-weight:900;line-height:.94;letter-spacing:-.02em;
-  font-size:clamp(38px,6.6vw,74px);margin:16px 0 0;text-transform:uppercase;
+  font-family:Unbounded,sans-serif;font-weight:800;line-height:1.06;letter-spacing:-.015em;
+  font-size:clamp(27px,3.4vw,42px);margin:14px 0 0;text-transform:uppercase;
 }
 .hero h1 em{font-style:normal;background:linear-gradient(96deg,var(--lime),var(--cy) 55%,var(--mag));
   -webkit-background-clip:text;background-clip:text;color:transparent}
 .hero .tag{font-family:Unbounded,sans-serif;font-size:12px;font-weight:600;letter-spacing:.22em;
   text-transform:uppercase;color:var(--ink3)}
-.hero .sub{font-size:18px;color:var(--ink2);margin:14px 0 0;max-width:44ch}
+.hero .sub{font-size:16px;color:var(--ink2);margin:14px 0 0;max-width:44ch}
 .hero .sub b{color:var(--ink)}
 .cta{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px}
 .btn{display:inline-flex;align-items:center;gap:8px;padding:12px 20px;border-radius:999px;
@@ -495,7 +576,7 @@ body::after{
 .clock{background:linear-gradient(160deg,var(--card),rgba(18,18,24,.4));border:1px solid var(--line);
   border-radius:var(--r);padding:22px}
 .clock .cl-lab{font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink3);font-weight:700}
-.clock .cl-time{font-family:Unbounded,sans-serif;font-weight:800;font-size:clamp(42px,7vw,60px);
+.clock .cl-time{font-family:Unbounded,sans-serif;font-weight:800;font-size:clamp(34px,4.6vw,46px);
   line-height:1;margin:8px 0 12px;font-variant-numeric:tabular-nums}
 .cd-bar{height:5px;border-radius:99px;background:var(--line);overflow:hidden}
 .cd-bar i{display:block;height:100%;width:0;border-radius:99px;
@@ -587,6 +668,21 @@ tbody tr:hover td,table tr.row:hover td{background:rgba(255,255,255,.022)}
 .strat-head p{margin:5px 0 14px;font-size:13.4px;color:var(--ink3)}
 .stat-row{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:14px}
 .stat{background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:11px 9px;text-align:center}
+.stat-btn{display:block;width:100%;cursor:pointer;background:none;border:0;padding:0;
+  font-family:Unbounded,sans-serif;font-weight:800;font-size:18px;color:var(--ink);
+  font-variant-numeric:tabular-nums;border-bottom:1px dashed var(--line2)}
+.stat-btn:hover{color:var(--lime);border-bottom-color:var(--lime)}
+.sig-list{margin:0 0 14px;border:1px solid var(--line2);border-radius:13px;padding:13px;
+  background:var(--card2)}
+.sig-cap{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink3);
+  font-weight:700;margin-bottom:9px}
+ul.mini{list-style:none;margin:0;padding:0;display:grid;gap:9px}
+ul.mini li{display:flex;justify-content:space-between;align-items:center;gap:11px;
+  font-size:13px;border-bottom:1px solid var(--line);padding-bottom:8px}
+ul.mini li:last-child{border-bottom:0;padding-bottom:0}
+.ms-ev{min-width:0}
+.ms-ev b{display:block;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ms-ev small{display:block;color:var(--ink3);font-size:11.5px;font-family:var(--mono)}
 .stat b{display:block;font-family:Unbounded,sans-serif;font-weight:800;font-size:18px;
   font-variant-numeric:tabular-nums}
 .stat span{display:block;font-size:10px;color:var(--ink3);margin-top:3px}
@@ -663,6 +759,7 @@ footer a{color:var(--ink2)}
     </span>
     <span class="sp"></span>
     <a class="link" href="#feed">Сигналы</a>
+    <a class="link" href="#active">Открытые</a>
     <a class="link" href="#proof">Проверка</a>
     <a class="link" href="#how">Как это работает</a>
     <span class="pill $freshness_class"><span class="dot"></span>$freshness_label</span>
@@ -727,6 +824,12 @@ $ticker
   «конторы» — сколько из них уже подвинулось, «ставим» — где старую цену ещё дают.</p>
   $summaries_html
 
+  <h2 id="active"><span class="hash">#</span>Открытые ставки</h2>
+  <p class="lead">Сигналы, по которым матч ещё не начался — $active_n $active_word.
+  Блок выше показывает только то, что шевельнулось в последнем срезе (это окно в
+  $poll_interval мин, и чаще всего оно пустое). Здесь — всё, на чём мы сейчас стоим.</p>
+  $active_signals
+
   <h2 id="how"><span class="hash">#</span>Как это работает</h2>
   <div class="bento">
     <div class="card how reveal">
@@ -767,7 +870,7 @@ $ticker
   <h3 style="font-family:Unbounded,sans-serif;font-size:15px;margin:26px 0 8px;text-transform:uppercase">Сыгравшие сигналы</h3>
   $resolved_table
 
-  <h3 style="font-family:Unbounded,sans-serif;font-size:15px;margin:26px 0 8px;text-transform:uppercase">Последние ставки</h3>
+  <h3 style="font-family:Unbounded,sans-serif;font-size:15px;margin:26px 0 8px;text-transform:uppercase">Последние сигналы — $last_n из $total_n</h3>
   $last_bets
 
   <div class="honest">
@@ -916,6 +1019,16 @@ SCRIPTS = Template(r"""<script>
     numbers.forEach(countUp);
   }
 
+  /* ------------------------------------------------- expandable counters */
+  document.querySelectorAll('.stat-btn').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var box = document.getElementById(b.dataset.open);
+      if (!box) return;
+      box.hidden = !box.hidden;
+      b.setAttribute('aria-expanded', box.hidden ? 'false' : 'true');
+    });
+  });
+
   /* -------------------------------------------------------------- sound */
   /* Browsers will not let any page make unmuted sound without a gesture --
      that is policy, not a bug, and trying to fight it is exactly the kind of
@@ -1021,6 +1134,8 @@ def render_dashboard(summaries: list, quota: dict = None):
     cov = storage.coverage_stats(24)
     aggressive = storage.alert_stats("prematch", "aggressive")
     optimal = storage.alert_stats("prematch", "optimal")
+    active = storage.active_signals(40)
+    last_bets = storage.recent_bets(10, "prematch")
 
     now = datetime.now(timezone.utc)
     fetched = _parse_iso(meta.get("fetched_at"))
@@ -1064,12 +1179,22 @@ def render_dashboard(summaries: list, quota: dict = None):
         top_books=_top_books(storage.top_books(10)),
         stats_aggressive=_strategy_card(
             aggressive, "Агрессивная",
-            "Все сигналы подряд, какой бы ни был коэффициент.", "agg"),
+            "Все сигналы подряд, какой бы ни был коэффициент.", "agg",
+            storage.recent_bets(5, "prematch", "aggressive")),
         stats_optimal=_strategy_card(
             optimal, "Оптимальная",
-            f"Только сигналы с коэффициентом входа не выше {OPTIMAL_MAX_PRICE:g}.", "opt"),
+            f"Только сигналы с коэффициентом входа не выше {OPTIMAL_MAX_PRICE:g}.", "opt",
+            storage.recent_bets(5, "prematch", "optimal")),
         resolved_table=_resolved_table(aggressive),
-        last_bets=_last_bets(storage.recent_bets(6, "prematch")),
+        active_signals=_active_signals(active),
+        active_n=len(active),
+        active_word=_plural(len(active), "ставка", "ставки", "ставок"),
+        # Spelled out rather than left implicit: the list below is capped at 10
+        # while the counter above shows every signal ever logged, and without
+        # both numbers on screen that looks like a bug.
+        last_n=len(last_bets),
+        total_n=aggressive["total"],
+        last_bets=_last_bets(last_bets, 10),
         scripts=SCRIPTS.template,
     )
     # git does not track empty directories, so a fresh CI checkout has no

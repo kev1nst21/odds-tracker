@@ -45,15 +45,17 @@ TAIL_MARGIN_SECONDS = 150
 
 
 def _window_end(now: datetime) -> datetime:
-    """When this run must be finished: the next scheduled workflow start,
-    minus a margin. Computed from the wall clock rather than from our own start
-    time, so a run that GitHub launched 8 minutes late still ends on the
-    boundary instead of running into its successor."""
-    step = max(1, PUBLISH_INTERVAL_MINUTES)
-    minutes_into_hour = now.hour * 60 + now.minute
-    next_slot = ((minutes_into_hour // step) + 1) * step
-    boundary = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(minutes=next_slot)
-    return boundary - timedelta(seconds=TAIL_MARGIN_SECONDS)
+    """When this run must stop polling, so the dashboard still gets published
+    before the next run is due.
+
+    Measured from OUR OWN start, not from the clock's half-hour boundaries.
+    The first version anchored to :00/:30, which broke the moment the cron
+    moved off those minutes: a run starting at :07 would quit at :27 and leave
+    a ten-minute hole every cycle. Start-relative also means a run GitHub
+    launched late still gets its full window instead of a stub.
+    """
+    return now + timedelta(minutes=max(1, PUBLISH_INTERVAL_MINUTES)) \
+               - timedelta(seconds=TAIL_MARGIN_SECONDS)
 
 
 def _poll_times(now: datetime, end: datetime, interval_min: int):
