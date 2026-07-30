@@ -1,25 +1,17 @@
 name: Poll odds
 
 # Cadence lives in cadence.json, NOT here. GitHub will not schedule a workflow
-# more often than every 5 minutes and runs even that late routinely, so a cron
-# of "*/3" is not an option. Instead this workflow fires on a schedule and
-# runner.py does its own clock-anchored loop inside the window -- which is how
-# the 3 / 5 / 10-minute experiment gets real 3-minute polls. Changing the
-# cadence means editing cadence.json; this file stays untouched.
+# more often than every 5 minutes, so a cron of "*/3" is not an option. The
+# workflow starts a run and runner.py does its own clock-anchored loop inside
+# it -- which is how the 3 / 5 / 10-minute experiment gets real 3-minute polls.
+# Changing the cadence means editing cadence.json; this file stays untouched.
 #
-# 2026-07-30: moved OFF the half-hour. Measured over the first 19 hours in
-# production, "*/30" produced FOUR runs instead of thirty-eight -- GitHub
-# dropped roughly nine schedules out of ten, which is why the bot looked quiet
-# and the counters barely moved. That is the documented failure mode: the
-# schedule event is delayed under load and skipped rather than queued, and :00
-# and :30 are the two busiest minutes of every hour because that is where
-# everyone points their cron. Odd minutes sit outside the stampede.
-#
-# Quota math against The Odds API's 20K/month plan (~9 sport keys x 1 credit
-# per poll): the experiment costs roughly 4,300 credits for the 3-minute day,
-# 2,600 for the 5-minute day and 1,300 for the 10-minute day, so it fits --
-# but only just, which is why runner.py stops polling when the balance nears
-# QUOTA_RESERVE_CREDITS instead of running the account flat mid-month.
+# The cron below is now only a fallback. Measured in production 2026-07-30,
+# GitHub ran this schedule 4 times in 19 hours instead of 38, and the two
+# following slots (17:07 and 17:37, deliberately moved off the busy :00/:30
+# minutes) were skipped as well. Manually started runs, by contrast, have begun
+# immediately every single time. So the run keeps itself going instead: the
+# last step asks GitHub to start the next one.
 on:
   schedule:
     - cron: "7,37 * * * *"
@@ -35,7 +27,7 @@ permissions:
 
 # Runs must never pile up: the loop writes to a SQLite file that is restored
 # from and saved to the CI cache, and two writers would corrupt the history.
-# runner.py finishes before the next slot on its own, so this is a backstop.
+# runner.py finishes before the next window on its own, so this is a backstop.
 concurrency:
   group: poll-odds
   cancel-in-progress: true
@@ -43,8 +35,8 @@ concurrency:
 jobs:
   poll:
     runs-on: ubuntu-latest
-    # The loop stops itself 2.5 minutes before the next scheduled run; this is
-    # only a hard backstop in case a single poll hangs on a slow API call.
+    # The loop stops itself 2.5 minutes before the next window; this is only a
+    # hard backstop in case a single poll hangs on a slow API call.
     timeout-minutes: 32
     environment:
       name: github-pages
@@ -57,22 +49,22 @@ jobs:
           python-version: "3.11"
 
       # actions/cache silently skips the save step if the exact key already
-      # exists -- with a fixed key that means the DB would only ever get
-      # saved once, and every run after that would "restore" the same stale
-      # snapshot forever (spike detection needs the previous run's prices,
-      # so this matters). Keying on the run id makes every run's save unique;
-      # restore-keys falls back to the most recent previous run's cache.
-      # The cache prefix has been bumped twice, both times deliberately and both
-      # times recorded here rather than done quietly:
+      # exists -- with a fixed key that means the DB would only ever get saved
+      # once, and every run after that would "restore" the same stale snapshot
+      # forever (spike detection needs the previous run's prices, so this
+      # matters). Keying on the run id makes every save unique; restore-keys
+      # falls back to the most recent previous run's cache.
+      #
+      # The prefix has been bumped twice, both times deliberately and both
+      # times written down here rather than done quietly:
       #   -v2- (2026-07-29) when the strategy split went live.
       #   -v3- (2026-07-30) after the entry rule was fixed. Six of the nine
-      #        signals logged under -v2- were produced by the bug that let
+      #        signals logged under -v2- came from the bug that let
       #        "был 3.20, ставим за 1.87" through, and publishing a win rate
       #        measured on a bug we had already removed would be worse than
       #        starting over with nine signals lost.
       # Schema changes do NOT justify a bump -- new columns arrive through
-      # storage._migrate(). Only a change to what counts as a signal does, and
-      # when it happens it gets written down.
+      # storage._migrate(). Only a change to what counts as a signal does.
       - name: Restore odds history DB
         uses: actions/cache@v4
         with:
@@ -112,3 +104,36 @@ jobs:
       - name: Deploy dashboard to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+      # Ask GitHub to start the next window, because the schedule above cannot
+      # be relied on (see the note at the top of this file).
+      #
+      # This deliberately requires a token that is NOT the built-in
+      # GITHUB_TOKEN: GitHub refuses to let a workflow start another workflow
+      # with the built-in one, specifically so a chain like this cannot appear
+      # by accident. Until a WORKFLOW_PAT secret exists this step prints a line
+      # and exits, so merging it changes nothing on its own.
+      #
+      # To stop the chain: delete the WORKFLOW_PAT secret, or disable this
+      # workflow in the Actions tab. Either takes effect on the next run.
+      - name: Queue the next polling window
+        if: always()
+        env:
+          GH_PAT: ${{ secrets.WORKFLOW_PAT }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+        run: |
+          if [ -z "$GH_PAT" ]; then
+            echo "WORKFLOW_PAT is not set -- the cron schedule stays the only trigger."
+            exit 0
+          fi
+          status=$(curl -sS -o /tmp/dispatch.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $GH_PAT" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/actions/workflows/poll.yml/dispatches" \
+            -d "{\"ref\":\"$REF\"}")
+          echo "next window requested, HTTP $status"
+          if [ "$status" != "204" ]; then
+            cat /tmp/dispatch.json
+            echo "Could not queue the next run -- check that WORKFLOW_PAT is valid and has Actions: read and write on this repository."
+          fi
