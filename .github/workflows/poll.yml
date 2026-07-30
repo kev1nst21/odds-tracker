@@ -1,21 +1,28 @@
 name: Poll odds
 
-# Cadence lives in cadence.json, NOT here. GitHub will not schedule anything
+# Cadence lives in cadence.json, NOT here. GitHub will not schedule a workflow
 # more often than every 5 minutes and runs even that late routinely, so a cron
-# of "*/3" is not an option. Instead this workflow fires every 30 minutes and
+# of "*/3" is not an option. Instead this workflow fires on a schedule and
 # runner.py does its own clock-anchored loop inside the window -- which is how
 # the 3 / 5 / 10-minute experiment gets real 3-minute polls. Changing the
 # cadence means editing cadence.json; this file stays untouched.
 #
+# 2026-07-30: moved OFF the half-hour. Measured over the first 19 hours in
+# production, "*/30" produced FOUR runs instead of thirty-eight -- GitHub
+# dropped roughly nine schedules out of ten, which is why the bot looked quiet
+# and the counters barely moved. That is the documented failure mode: the
+# schedule event is delayed under load and skipped rather than queued, and :00
+# and :30 are the two busiest minutes of every hour because that is where
+# everyone points their cron. Odd minutes sit outside the stampede.
+#
 # Quota math against The Odds API's 20K/month plan (~9 sport keys x 1 credit
-# per poll): 30 min = ~13,000/mo. The experiment costs roughly 4,300 credits
-# for the 3-minute day, 2,600 for the 5-minute day and 1,300 for the
-# 10-minute day, so it fits -- but only just, which is why runner.py stops
-# polling when the balance nears QUOTA_RESERVE_CREDITS instead of running the
-# account flat mid-month.
+# per poll): the experiment costs roughly 4,300 credits for the 3-minute day,
+# 2,600 for the 5-minute day and 1,300 for the 10-minute day, so it fits --
+# but only just, which is why runner.py stops polling when the balance nears
+# QUOTA_RESERVE_CREDITS instead of running the account flat mid-month.
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "7,37 * * * *"
   workflow_dispatch: {}
 
 # pages/id-token are needed by actions/deploy-pages below; contents stays
