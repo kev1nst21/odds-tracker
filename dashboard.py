@@ -127,16 +127,23 @@ def _event_row(s: dict) -> str:
     else:
         bet_cell = "<td class='c-bet'><span class='chip shut'>⛔ закрыт</span></td>"
 
-    tags = []
-    if strategy == "optimal":
+    # The tag names the optimal line's ACTUAL bet, not a bucket. Since
+    # 2026-07-30 that line does not skip a long shot, it enters it softly --
+    # so "ОПТИМАЛЬНАЯ" alone would hide which bet is meant.
+    tags = [f"<span class='tag agg' title='Прямая победа за "
+            f"{(bet.get('entry_price') or 0):.2f}'>АГРЕССИВНАЯ</span>"]
+    opt = s.get("optimal")
+    if not opt:
+        pass
+    elif opt["kind"] == "straight":
         tags.append("<span class='tag opt' title='Коэффициент входа не выше "
-                    f"{OPTIMAL_MAX_PRICE:g}'>ОПТИМАЛЬНАЯ</span>")
+                    f"{OPTIMAL_MAX_PRICE:g}'>ОПТИМАЛЬНАЯ — та же ставка</span>")
+    elif opt.get("price"):
+        tags.append(f"<span class='tag opt' title='{html.escape(opt.get('note') or '')}'>"
+                    f"ОПТИМАЛЬНАЯ — двойной шанс {opt['price']:.2f}</span>")
     else:
-        tags.append("<span class='tag agg'>АГРЕССИВНАЯ</span>")
-    if safe:
-        label = ("двойной шанс " + f"{safe['price']:.2f}") if safe.get("price") else "фора"
-        tags.append(f"<span class='tag safe' title='{html.escape(safe.get('note') or '')}'>"
-                    f"🛡 {html.escape(label)}</span>")
+        tags.append(f"<span class='tag safe' title='{html.escape(opt.get('note') or '')}'>"
+                    f"🛡 ОПТИМАЛЬНАЯ — {html.escape(opt['pick'])[:44]}</span>")
 
     return (
         # Deliberately NOT a .reveal element: the feed is the one thing on the
@@ -317,6 +324,24 @@ def _mini_signals(rows) -> str:
     return "<ul class='mini'>" + "".join(items) + "</ul>"
 
 
+def _unverifiable_note(stats: dict) -> str:
+    """Say out loud how many of this strategy's bets can never be settled.
+
+    Handicaps are a real instruction the analyst can act on, but we buy neither
+    their line nor their price, so there is no way to check afterwards whether
+    one won. They are therefore counted as signals and excluded from the win
+    rate -- and that exclusion is stated on the card rather than left for
+    someone to discover by adding the numbers up.
+    """
+    n = stats.get("unverifiable") or 0
+    if not n:
+        return ""
+    return (f"<p class='note-warn'>Из них {n} "
+            f"{_plural(n, 'вход', 'входа', 'входов')} через фору — "
+            f"мы не выкупаем этот рынок, поэтому проверить их по счёту "
+            f"нельзя, и в заходимость они не попадают.</p>")
+
+
 def _strategy_card(stats: dict, title: str, subtitle: str, cls: str, recent=None) -> str:
     win_rate = stats["win_rate"]
     win_rate_html = f"{win_rate:.0f}%" if win_rate is not None else "—"
@@ -337,6 +362,7 @@ def _strategy_card(stats: dict, title: str, subtitle: str, cls: str, recent=None
         <div class="stat"><b>{win_rate_html}</b><span>заходимость</span></div>
         <div class="stat"><b>{avg_clv_html}</b><span>средний CLV</span></div>
       </div>
+      {_unverifiable_note(stats)}
       <div class="sig-list" id="sig-{cls}" hidden>
         <div class="sig-cap">Последние сигналы этой стратегии</div>
         {_mini_signals(recent)}
@@ -686,6 +712,7 @@ ul.mini li:last-child{border-bottom:0;padding-bottom:0}
 .stat b{display:block;font-family:Unbounded,sans-serif;font-weight:800;font-size:18px;
   font-variant-numeric:tabular-nums}
 .stat span{display:block;font-size:10px;color:var(--ink3);margin-top:3px}
+.note-warn{font-size:12px;color:var(--warn);background:rgba(255,197,49,.07);border:1px solid rgba(255,197,49,.22);border-radius:11px;padding:9px 11px;margin:0 0 12px}
 .bank{border-radius:14px;padding:15px;border:1px solid var(--line);background:var(--card2)}
 .bank.good{border-color:rgba(61,220,132,.3)} .bank.bad{border-color:rgba(255,107,107,.3)}
 .bank-head{font-size:13px;color:var(--ink2)}
@@ -1183,7 +1210,7 @@ def render_dashboard(summaries: list, quota: dict = None):
             storage.recent_bets(5, "prematch", "aggressive")),
         stats_optimal=_strategy_card(
             optimal, "Оптимальная",
-            f"Только сигналы с коэффициентом входа не выше {OPTIMAL_MAX_PRICE:g}.", "opt",
+            f"До {OPTIMAL_MAX_PRICE:g} — та же ставка. Выше — вход мягче: двойной шанс в футболе, фора там, где ничьей нет.", "opt",
             storage.recent_bets(5, "prematch", "optimal")),
         resolved_table=_resolved_table(aggressive),
         active_signals=_active_signals(active),

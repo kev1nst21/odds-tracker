@@ -140,6 +140,22 @@ _MIGRATIONS = {
         # 3/5/10-minute experiment is to compare buckets, and that is only
         # possible if each row remembers which bucket it belongs to.
         "poll_interval_minutes": "INTEGER",
+        # What the ОПТИМАЛЬНАЯ strategy actually did with this signal, which
+        # since 2026-07-30 is no longer "the same bet or nothing": at or below
+        # the cut-off it backs the straight pick, above it the double chance or
+        # a handicap. Stored separately from the aggressive bet because the two
+        # strategies now place DIFFERENT bets at DIFFERENT prices on the same
+        # event, and one set of columns cannot describe both.
+        "opt_kind": "TEXT",        # 'straight' | 'double_chance' | 'handicap'
+        "opt_pick": "TEXT",
+        "opt_price": "REAL",
+        "opt_book": "TEXT",
+        # 0 for handicaps: we know neither the line taken nor the price paid,
+        # so there is no honest way to settle one. Ungradeable rows are shown
+        # on the site but never enter a win rate.
+        "opt_gradeable": "INTEGER",
+        # Graded separately from `result` -- a double chance also wins on a draw.
+        "opt_result": "TEXT",
     },
 }
 
@@ -317,6 +333,7 @@ def save_bet_alert(summary: dict, detected_at: str, poll_interval_minutes: int =
     if not bet.get("entry_price"):
         return False
     safe = summary.get("safe") or {}
+    opt = summary.get("optimal") or {}
     with _conn() as conn:
         cur = conn.execute(
             """
@@ -327,9 +344,11 @@ def save_bet_alert(summary: dict, detected_at: str, poll_interval_minutes: int =
                  market_id, player_key, bookmaker, label, direction,
                  alert_price, detected_at, resolved,
                  strategy, safe_market, safe_pick, safe_price, safe_book,
-                 poll_interval_minutes)
+                 poll_interval_minutes,
+                 opt_kind, opt_pick, opt_price, opt_book, opt_gradeable)
             VALUES (?, 'prematch', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'down', ?, ?, 0,
-                    ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?)
             """,
             (
                 "bet",
@@ -359,6 +378,11 @@ def save_bet_alert(summary: dict, detected_at: str, poll_interval_minutes: int =
                 safe.get("price"),
                 safe.get("book"),
                 poll_interval_minutes,
+                opt.get("kind"),
+                opt.get("pick"),
+                opt.get("price"),
+                opt.get("book"),
+                1 if opt.get("gradeable") else 0,
             ),
         )
         conn.commit()
@@ -375,7 +399,8 @@ def get_unresolved_alerts(before_iso: str, limit: int = 200):
             """
             SELECT id, alert_type, fixture_id, sport_key, start_time, home_team, away_team,
                    bookmaker, market_id, outcome_id, outcome_name, player_key, label,
-                   direction, alert_price, entry_price, old_price, new_price, detected_at
+                   direction, alert_price, entry_price, old_price, new_price, detected_at,
+                   opt_kind, opt_price, opt_gradeable
             FROM tracked_alerts
             WHERE resolved=0 AND start_time IS NOT NULL AND start_time < ?
             ORDER BY start_time ASC LIMIT ?
@@ -385,12 +410,17 @@ def get_unresolved_alerts(before_iso: str, limit: int = 200):
         return rows
 
 
-def mark_resolved(alert_id: int, result: str, resolved_at: str, clv_pct: float = None, clv_continued=None):
+def mark_resolved(alert_id: int, result: str, resolved_at: str, clv_pct: float = None,
+                  clv_continued=None, opt_result: str = None):
+    """Settle an alert. `opt_result` is stored separately because the optimal
+    strategy may have placed a different bet on the same event -- a double
+    chance also wins when the match ends level, so it cannot share the straight
+    bet's verdict."""
     with _conn() as conn:
         conn.execute(
             """
             UPDATE tracked_alerts
-            SET resolved=1, result=?, resolved_at=?, clv_pct=?, clv_continued=?
+            SET resolved=1, result=?, resolved_at=?, clv_pct=?, clv_continued=?, opt_result=?
             WHERE id=?
             """,
             (
@@ -398,6 +428,7 @@ def mark_resolved(alert_id: int, result: str, resolved_at: str, clv_pct: float =
                 resolved_at,
                 clv_pct,
                 None if clv_continued is None else int(clv_continued),
+                opt_result,
                 alert_id,
             ),
         )
@@ -407,18 +438,33 @@ def mark_resolved(alert_id: int, result: str, resolved_at: str, clv_pct: float =
 def _strategy_clause(strategy: str):
     """SQL fragment + params restricting rows to one strategy bucket.
 
-    'aggressive' is every signal, so it adds nothing. 'optimal' is the subset
-    priced at or below OPTIMAL_MAX_PRICE. The stored column is trusted when
-    present; rows written before the column existed fall back to their entry
-    price, so old history still lands in the right bucket instead of vanishing.
+    'aggressive' is every signal, so it adds nothing. 'optimal' is every signal
+    the optimal line found a way into -- straight below the cut-off, double
+    chance or handicap above it. Rows written before opt_kind existed fall back
+    to their entry price so old history still lands somewhere sensible instead
+    of vanishing.
     """
     if strategy != "optimal":
         return "", ()
     return (
-        " AND (strategy='optimal' OR (strategy IS NULL AND entry_price IS NOT NULL"
+        " AND (opt_kind IS NOT NULL OR (opt_kind IS NULL AND entry_price IS NOT NULL"
         " AND entry_price<=?))",
         (OPTIMAL_MAX_PRICE,),
     )
+
+
+def _strategy_columns(strategy: str):
+    """Which result and price columns describe THIS strategy's bet.
+
+    The two lines no longer place the same bet: on a 4.00 pick the aggressive
+    line backs the winner at 4.00 while the optimal line backs the double
+    chance at ~1.90. Scoring both off `result` and `entry_price` would credit
+    the optimal line with a bet it never made, so each strategy is settled and
+    priced from its own columns.
+    """
+    if strategy == "optimal":
+        return "COALESCE(opt_result, result)", "COALESCE(opt_price, entry_price)"
+    return "result", "entry_price"
 
 
 def alert_stats(kind: str = "prematch", strategy: str = "aggressive"):
@@ -434,6 +480,11 @@ def alert_stats(kind: str = "prematch", strategy: str = "aggressive"):
     than between two unrelated samples.
     """
     sf, sp = _strategy_clause(strategy)
+    res_col, price_col = _strategy_columns(strategy)
+    # Handicap plays carry no price and no line, so they can never be settled.
+    # They are counted in the signal total but excluded from anything that
+    # claims to measure performance.
+    checkable = " AND opt_gradeable=1" if strategy == "optimal" else ""
     with _conn() as conn:
         k = (kind,) + sp
 
@@ -441,29 +492,39 @@ def alert_stats(kind: str = "prematch", strategy: str = "aggressive"):
             return conn.execute(sql, k).fetchone()
 
         total = one(f"SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=?{sf}")["n"]
-        resolved = one(f"SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=? AND resolved=1{sf}")["n"]
-        hits = one(f"SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=? AND result='hit'{sf}")["n"]
-        misses = one(f"SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=? AND result='miss'{sf}")["n"]
+        unverifiable = one(
+            f"SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=?{sf} AND opt_gradeable=0"
+        )["n"] if strategy == "optimal" else 0
+        resolved = one(
+            f"SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=? AND resolved=1{sf}{checkable}"
+        )["n"]
+        hits = one(
+            f"SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=? AND {res_col}='hit'{sf}{checkable}"
+        )["n"]
+        misses = one(
+            f"SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=? AND {res_col}='miss'{sf}{checkable}"
+        )["n"]
         clv_row = one(
             "SELECT AVG(clv_pct) AS avg_clv, "
             "SUM(CASE WHEN clv_continued=1 THEN 1 ELSE 0 END) AS clv_wins, "
             "SUM(CASE WHEN clv_continued IS NOT NULL THEN 1 ELSE 0 END) AS clv_n "
-            f"FROM tracked_alerts WHERE kind=? AND clv_pct IS NOT NULL{sf}"
+            f"FROM tracked_alerts WHERE kind=? AND clv_pct IS NOT NULL{sf}{checkable}"
         )
         recent = conn.execute(
             "SELECT fixture_id, home_team, away_team, outcome_name, stars, "
-            "       old_price, new_price, entry_price, entry_book, "
-            "       result, clv_pct, clv_continued, resolved_at "
-            f"FROM tracked_alerts WHERE kind=? AND resolved=1{sf} "
+            f"       old_price, new_price, {price_col} AS entry_price, entry_book, "
+            f"       {res_col} AS result, clv_pct, clv_continued, resolved_at "
+            f"FROM tracked_alerts WHERE kind=? AND resolved=1{sf}{checkable} "
             "ORDER BY resolved_at DESC LIMIT 20", k
         ).fetchall()
-        # Flat-stake profit/loss over every graded bet, priced at the entry we
-        # actually recommended. A win returns stake x (odds - 1), a loss costs
+        # Flat-stake profit/loss over every graded bet, priced at the entry THIS
+        # strategy actually took. A win returns stake x (odds - 1), a loss costs
         # the stake. Bets graded 'n/a' are excluded rather than counted as
         # pushes -- we don't know what they did.
         graded = conn.execute(
-            "SELECT result, entry_price FROM tracked_alerts "
-            f"WHERE kind=? AND resolved=1 AND result IN ('hit','miss') AND entry_price IS NOT NULL{sf}",
+            f"SELECT {res_col} AS result, {price_col} AS entry_price FROM tracked_alerts "
+            f"WHERE kind=? AND resolved=1 AND {res_col} IN ('hit','miss') "
+            f"AND {price_col} IS NOT NULL{sf}{checkable}",
             k,
         ).fetchall()
         clv_n = clv_row["clv_n"] or 0
@@ -486,6 +547,8 @@ def alert_stats(kind: str = "prematch", strategy: str = "aggressive"):
             "clv_n": clv_n,
             "kind": kind,
             "strategy": strategy,
+            # Handicap entries: real recommendations, impossible to settle.
+            "unverifiable": unverifiable,
             "max_price": OPTIMAL_MAX_PRICE if strategy == "optimal" else None,
             "stake": FLAT_STAKE,
             "graded_n": len(graded),
@@ -530,7 +593,8 @@ def active_signals(limit: int = 40, kind: str = "prematch"):
             SELECT fixture_id, sport_key, home_team, away_team, outcome_name, stars,
                    down_count, books_count, old_price, new_price, entry_price,
                    entry_book, start_time, detected_at, strategy,
-                   safe_market, safe_pick, safe_price
+                   safe_market, safe_pick, safe_price,
+                   opt_kind, opt_pick, opt_price, opt_book, opt_gradeable
             FROM tracked_alerts
             WHERE kind=? AND resolved=0 AND start_time IS NOT NULL AND start_time > ?
             ORDER BY start_time ASC LIMIT ?
@@ -577,6 +641,7 @@ def export_ledger(limit: int = 5000):
                    outcome_name, stars, down_count, books_count,
                    old_price, new_price, entry_price, entry_book,
                    strategy, safe_market, safe_pick, safe_price,
+                   opt_kind, opt_pick, opt_price, opt_book, opt_gradeable, opt_result,
                    poll_interval_minutes, resolved, result, clv_pct, resolved_at
             FROM tracked_alerts WHERE kind='prematch'
             ORDER BY detected_at ASC LIMIT ?

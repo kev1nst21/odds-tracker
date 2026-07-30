@@ -68,22 +68,25 @@ def _format_event(s: dict) -> str:
         lines.append("")
         lines.append("⛔️ Вход закрыт — просело у всех, старую цену взять негде.")
 
-    # Which strategy bucket this one counts towards, so the two win rates on
-    # the site can be traced back to individual messages here.
-    if s.get("strategy") == "optimal":
-        lines.append(f"\n🟢 <i>Оптимальная — коэффициент не выше {OPTIMAL_MAX_PRICE:g}</i>")
+    # What the optimal line does with this same event. It is no longer just a
+    # label saying "counts / doesn't count": above the cut-off that line enters
+    # through the double chance or a handicap instead of skipping, so the
+    # message has to name the actual second bet.
+    opt = s.get("optimal")
+    lines.append("")
+    if not opt:
+        lines.append("🔴 <i>Только агрессивная — мягкого входа в это событие нет.</i>")
+    elif opt["kind"] == "straight":
+        lines.append(f"🟢 <b>Оптимальная:</b> та же ставка за {opt['price']:.2f} "
+                     f"<i>(в пределах {OPTIMAL_MAX_PRICE:g})</i>")
+    elif opt.get("price"):
+        lines.append(f"🟢 <b>Оптимальная:</b> {html.escape(opt['pick'])} ≈ {opt['price']:.2f}")
+        if opt.get("note"):
+            lines.append(f"<i>{html.escape(opt['note'])}</i>")
     else:
-        lines.append("\n🔴 <i>Агрессивная — коэффициент высокий</i>")
-
-    safe = s.get("safe")
-    if safe:
-        lines.append("")
-        if safe.get("price"):
-            lines.append(f"🛡 <b>Безопасный вариант: {html.escape(safe['pick'])} "
-                         f"≈ {safe['price']:.2f}</b>")
-        else:
-            lines.append(f"🛡 <b>Безопасный вариант: {html.escape(safe['pick'])}</b>")
-        lines.append(f"<i>{html.escape(safe.get('note') or '')}</i>")
+        lines.append(f"🟡 <b>Оптимальная:</b> {html.escape(opt['pick'])}")
+        lines.append("<i>Цену смотри в линии. В статистику этот вход не пойдёт — "
+                     "форы мы не выкупаем и проверить её по счёту не можем.</i>")
 
     return "\n".join(lines)
 

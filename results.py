@@ -149,7 +149,34 @@ def check_pending_results(now: datetime = None) -> int:
             result = "hit" if side == winner else "miss"
 
         clv_pct, clv_continued = _compute_clv(row)
-        storage.mark_resolved(row["id"], result, now.isoformat(), clv_pct, clv_continued)
+        storage.mark_resolved(row["id"], result, now.isoformat(), clv_pct, clv_continued,
+                              _optimal_result(row, winner, side, result))
         resolved_count += 1
 
     return resolved_count
+
+
+def _optimal_result(row, winner, side, straight_result):
+    """Settle the bet the ОПТИМАЛЬНАЯ strategy placed, which since 2026-07-30
+    is not always the same bet as the aggressive one.
+
+      * 'straight'      -- identical bet, identical verdict.
+      * 'double_chance' -- backing "our side OR the draw", so it also wins when
+                           the match ends level. This is settleable from the
+                           final score alone, which is exactly why football
+                           long shots are allowed into the optimal statistics.
+      * 'handicap'      -- returns None. We never knew the line or the price,
+                           so there is no honest verdict to record. Leaving it
+                           unsettled keeps it out of the win rate instead of
+                           quietly counting as a loss (or, worse, a win).
+    """
+    kind = row["opt_kind"] if "opt_kind" in row.keys() else None
+    if not kind:
+        return None
+    if kind == "straight":
+        return straight_result
+    if kind == "double_chance":
+        if winner is None or side not in _VALID_SIDES:
+            return "n/a"
+        return "hit" if winner in (side, "draw") else "miss"
+    return None

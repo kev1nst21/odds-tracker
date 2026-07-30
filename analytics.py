@@ -169,7 +169,14 @@ _HANDICAP_HINTS = (
     ("tennis_", "фора по геймам (обычно −3.5 / +3.5) либо тотал геймов"),
     ("table_tennis", "фора по очкам"),
     ("esports_", "фора по картам (−1.5 / +1.5)"),
+    ("basketball_", "фора по очкам либо фора на четверть"),
+    ("icehockey_", "фора по шайбам (−1.5 / +1.5)"),
+    ("baseball_", "фора по раннам (−1.5 / +1.5)"),
 )
+
+# Every other two-way sport still gets an answer rather than silence -- the
+# market always exists, we just can't name its unit generically.
+_HANDICAP_DEFAULT = "фора (минусовая на фаворита либо плюсовая на аутсайдера)"
 
 
 def _handicap_hint(sport_key: str):
@@ -177,13 +184,20 @@ def _handicap_hint(sport_key: str):
     for prefix, hint in _HANDICAP_HINTS:
         if key.startswith(prefix):
             return hint
-    return None
+    return _HANDICAP_DEFAULT
 
 
-def _safe_variant(bet: dict, by_book: dict, sport_key: str):
+def _safe_variant(bet: dict, by_book: dict, sport_key: str, trigger: float = None):
     """A lower-risk way to back the same opinion when the straight price is
     high (user decision, 2026-07-29: above 3.5 offer a "безопасный" variant
     landing around 1.7-2.5).
+
+    Gradeability differs by sport and that difference is load-bearing. The
+    football double chance below is computed from prices we already hold AND
+    can be settled from the final score -- our side won or it ended level.
+    A handicap cannot: we know neither the line nor the price, so it is
+    returned as an instruction and marked ungradeable, and nothing ungradeable
+    is ever allowed into a win rate.
 
     In football the maths is exact and needs no extra data. Backing "our side
     OR the draw" is the same as splitting a stake across those two outcomes,
@@ -205,7 +219,8 @@ def _safe_variant(bet: dict, by_book: dict, sport_key: str):
     """
     if not bet or not bet.get("entry_price"):
         return None
-    if bet["entry_price"] <= SAFE_TRIGGER_PRICE:
+    trigger = SAFE_TRIGGER_PRICE if trigger is None else trigger
+    if bet["entry_price"] <= trigger:
         return None
 
     side, name = bet["side"], bet["name"]
@@ -231,6 +246,7 @@ def _safe_variant(bet: dict, by_book: dict, sport_key: str):
             "legs": [(name, round(best["pick_odds"], 2)),
                      ("Ничья", round(best["draw_odds"], 2))],
             "in_band": in_band,
+            "gradeable": True,
             "note": (
                 f"Двойной шанс собирается на {best['book']}: делим ставку между "
                 f"«{name}» ({best['pick_odds']:.2f}) и ничьей ({best['draw_odds']:.2f}) "
@@ -250,6 +266,9 @@ def _safe_variant(bet: dict, by_book: dict, sport_key: str):
             "book": None,
             "legs": [],
             "in_band": None,
+            # No price and no line means no way to settle it afterwards, so it
+            # is shown as a recommendation and kept out of every statistic.
+            "gradeable": False,
             "note": (
                 f"Прямой коэффициент {bet['entry_price']:.2f} высокий, а ничьей в этом "
                 f"виде спорта нет, поэтому двойной шанс не собрать. Безопасный вариант — "
@@ -258,6 +277,56 @@ def _safe_variant(bet: dict, by_book: dict, sport_key: str):
             ),
         }
     return None
+
+
+def _optimal_play(bet: dict, safe: dict):
+    """What the ОПТИМАЛЬНАЯ strategy actually does with this signal.
+
+    The first version simply threw away every signal priced above the cut-off,
+    which is not what the strategy is for. The user's rule (2026-07-30) is that
+    the optimal line does not skip the event, it enters it more softly:
+
+        "если это футбол к примеру и у нас победа коф 3.5 и он не проходит по
+         критериям на победу, то мы ставим соответственно с форой и иксом...
+         в теннисе так же с форой, в баскетболе, киберспорте тоже фора"
+
+    So there are three outcomes here, and exactly one of them is a skip:
+
+      * price at or below the cut-off -> back the straight pick, same as the
+        aggressive line. Gradeable.
+      * above it, football -> back the double chance instead. Gradeable, and
+        priced from data we already hold.
+      * above it, no draw in this sport -> name the handicap. NOT gradeable,
+        so it is published as a recommendation and never counted in the win
+        rate. Inventing a settled result for a bet whose line and price we
+        never knew would be the single fastest way to make this statistic
+        worthless.
+    """
+    if not bet or not bet.get("entry_price"):
+        return None
+
+    if bet["entry_price"] <= OPTIMAL_MAX_PRICE:
+        return {
+            "kind": "straight",
+            "pick": bet["name"],
+            "price": bet["entry_price"],
+            "book": bet["entry_book"],
+            "gradeable": True,
+            "note": f"Коэффициент {bet['entry_price']:.2f} в пределах "
+                    f"{OPTIMAL_MAX_PRICE:g} — берём прямую победу.",
+        }
+
+    if not safe:
+        return None
+
+    return {
+        "kind": safe["market"],
+        "pick": safe["pick"],
+        "price": safe.get("price"),
+        "book": safe.get("book"),
+        "gradeable": bool(safe.get("gradeable")),
+        "note": safe.get("note"),
+    }
 
 
 def build_event_summaries(records: list, spikes: list = None, movements: list = None) -> list:
@@ -395,14 +464,20 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
         has_entry = bool(bet and bet["entry_price"])
         stars = bet["stars"] if bet else 0
 
-        # Which strategy bucket this signal falls into. Both buckets are fed by
-        # the same signal stream -- ОПТИМАЛЬНАЯ is simply the subset priced at
-        # or below the cut-off -- so comparing their win rates later actually
-        # answers "is skipping the long shots worth it", rather than comparing
-        # two unrelated sets of bets.
-        strategy = ("optimal" if has_entry and bet["entry_price"] <= OPTIMAL_MAX_PRICE
-                    else "aggressive")
-        safe = _safe_variant(bet, by_book, sample.get("sport_key")) if has_entry else None
+        # The safe variant is computed from OPTIMAL_MAX_PRICE upwards, not from
+        # SAFE_TRIGGER_PRICE, because the optimal line needs one as soon as the
+        # straight price stops qualifying -- a 3.00 pick has no safe
+        # alternative to offer otherwise. Whether it is also SHOWN as a
+        # "безопасный вариант" on the card still follows the 3.5 threshold.
+        safe = (_safe_variant(bet, by_book, sample.get("sport_key"),
+                              trigger=min(OPTIMAL_MAX_PRICE, SAFE_TRIGGER_PRICE))
+                if has_entry else None)
+        optimal = _optimal_play(bet, safe)
+        # Both strategies are fed by the SAME signal stream, so the comparison
+        # answers "does entering softly beat entering straight" rather than
+        # comparing two unrelated sets of bets. A signal only falls out of the
+        # optimal line when there is no softer way in at all.
+        strategy = "optimal" if optimal else "aggressive"
         # Only a drop of at least the alert threshold is worth a notification.
         # Sub-threshold drift still shows on the site but must never reach the
         # bot -- the user explicitly does not want small moves pushed to them.
@@ -423,8 +498,9 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
             "alertable": big_enough and has_entry,
             "stars": stars,
             "strategy": strategy,
-            "safe": safe,
-            "verdict": _verdict(bet, has_entry, safe),
+            "safe": safe if (has_entry and bet["entry_price"] > SAFE_TRIGGER_PRICE) else None,
+            "optimal": optimal,
+            "verdict": _verdict(bet, has_entry, safe, optimal),
         })
 
     # Sub-threshold drift is dropped entirely rather than shown greyed out.
@@ -445,7 +521,7 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
     return summaries
 
 
-def _verdict(bet, has_entry, safe=None) -> str:
+def _verdict(bet, has_entry, safe=None, optimal=None) -> str:
     """The conclusion, phrased the way the user actually reasons about the bet:
     'был коэффициент 3, просел до 2.1, желательно проставить за 3'."""
     if not bet:
@@ -483,4 +559,13 @@ def _verdict(bet, has_entry, safe=None) -> str:
 
     if safe and safe.get("note"):
         parts.append("Безопасный вариант: " + safe["note"])
+
+    if optimal and optimal["kind"] != "straight":
+        if optimal.get("price"):
+            parts.append(f"Оптимальная стратегия входит через «{optimal['pick']}» "
+                         f"за {optimal['price']:.2f}.")
+        else:
+            parts.append(f"Оптимальная стратегия входит через «{optimal['pick']}» — "
+                         f"цену смотреть в линии, в статистику она не попадёт, "
+                         f"потому что проверить её по счёту невозможно.")
     return " ".join(parts)
