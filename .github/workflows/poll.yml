@@ -62,18 +62,23 @@ jobs:
       # snapshot forever (spike detection needs the previous run's prices,
       # so this matters). Keying on the run id makes every run's save unique;
       # restore-keys falls back to the most recent previous run's cache.
-      # 2026-07-29: the cache prefix was bumped to -v2- once, deliberately, to
-      # start the counters from zero at the moment the strategy split and the
-      # 3-minute experiment went live. Everything logged before that was under
-      # different mechanics and would have made the first week's numbers
-      # meaningless. This is the LAST reset: new columns now arrive through
-      # storage._migrate() instead of by throwing the history away.
+      # The cache prefix has been bumped twice, both times deliberately and both
+      # times recorded here rather than done quietly:
+      #   -v2- (2026-07-29) when the strategy split went live.
+      #   -v3- (2026-07-30) after the entry rule was fixed. Six of the nine
+      #        signals logged under -v2- were produced by the bug that let
+      #        "был 3.20, ставим за 1.87" through, and publishing a win rate
+      #        measured on a bug we had already removed would be worse than
+      #        starting over with nine signals lost.
+      # Schema changes do NOT justify a bump -- new columns arrive through
+      # storage._migrate(). Only a change to what counts as a signal does, and
+      # when it happens it gets written down.
       - name: Restore odds history DB
         uses: actions/cache@v4
         with:
           path: data
-          key: odds-history-v2-${{ github.run_id }}
-          restore-keys: odds-history-v2-
+          key: odds-history-v3-${{ github.run_id }}
+          restore-keys: odds-history-v3-
 
       - run: pip install -r requirements.txt
 
