@@ -29,6 +29,7 @@ import analytics
 import storage
 from config import (
     DASHBOARD_PATH,
+    FLAT_STAKE,
     POLL_INTERVAL_MINUTES,
     PUBLISH_INTERVAL_MINUTES,
     CADENCE_LABEL,
@@ -167,6 +168,89 @@ def _funnel_block(f: dict, span: str) -> str:
     )
 
 
+def _movements_table(rows) -> str:
+    """Every detected move, priced at the coefficient before it fell."""
+    if not rows:
+        return ("<p class='empty small'>Движений пока не зафиксировано. "
+                "Здесь будет каждое падение от порога — и те, что стали сигналом, "
+                "и те, где взять цену было уже негде.</p>")
+    items = []
+    for r in rows:
+        home, away = r["home_team"], r["away_team"]
+        event = f"{home} — {away}" if home and away else str(r["fixture_id"])
+        caught = f"{r['old_price']:.2f}" if r["old_price"] else "—"
+        newp = f"{r['new_price']:.2f}" if r["new_price"] else "—"
+        drop = f"−{abs(r['drop_pct']):.0f}%" if r["drop_pct"] else ""
+        if r["resolved"]:
+            st = {"hit": "<span class='hit'>✅ зашла</span>",
+                  "miss": "<span class='miss'>❌ не зашла</span>"}.get(
+                      r["result"], "<span class='pending'>— н/д</span>")
+            pnl = ""
+            if r["result"] == "hit" and r["old_price"]:
+                pnl = f"<small class='pnl good'>+${FLAT_STAKE * (r['old_price'] - 1):,.0f}</small>"
+            elif r["result"] == "miss":
+                pnl = f"<small class='pnl bad'>−${FLAT_STAKE:,.0f}</small>"
+            st += pnl.replace(",", " ")
+        else:
+            st = "<span class='pending'>⏳ ждём</span>" + _countdown(r["start_time"])
+        # Whether this move was also bettable is the single most useful fact
+        # about it -- it is the difference between the ceiling and the money.
+        mark = ("<span class='tag opt'>был вход</span>" if r["had_entry"]
+                else "<span class='tag agg'>входа не было</span>")
+        items.append(
+            f"<tr class='row'><td class='c-stars'>{'★' * (r['stars'] or 0)}</td>"
+            f"<td class='c-ev'><b>{html.escape(event)}</b>"
+            f"<small>{_fmt_start(r['start_time'])} UTC</small></td>"
+            f"<td class='c-out'>{html.escape(r['outcome_name'] or '')}"
+            f"<div class='tags'>{mark}</div></td>"
+            f"<td class='c-move'><span class='new'>{newp}</span>"
+            f"<span class='pct'>{drop}</span></td>"
+            f"<td class='c-books'>{r['down_count'] or 0}<span class='of'>/{r['books_count'] or 0}</span></td>"
+            f"<td class='c-bet'><span class='price'>{caught}</span><small>поймали бы</small></td>"
+            f"<td>{st}</td></tr>"
+        )
+    return ("<div class='feed-wrap'><table class='feed'>"
+            "<tr><th></th><th>Событие</th><th>Деньги на</th><th>Стал</th>"
+            "<th>Контор</th><th>Коэф. до падения</th><th>Итог</th></tr>"
+            + "".join(items) + "</table></div>")
+
+
+def _movement_stats(m: dict) -> str:
+    """The ceiling: what backing every move at the pre-drop price would return.
+
+    Stated as a ceiling on purpose. old_price is frequently a number nobody was
+    still offering by the time the move was visible -- that is precisely why
+    many of these never became signals. Presenting it as achievable profit
+    would be the most flattering lie this page could tell, so the caveat sits
+    directly under the figure rather than in a footnote.
+    """
+    wr = f"{m['win_rate']:.0f}%" if m.get("win_rate") is not None else "—"
+    profit = m.get("profit") or 0
+    sign = "+" if profit >= 0 else "−"
+    cls = "good" if profit > 0 else ("bad" if profit < 0 else "neutral")
+    n = m.get("graded_n") or 0
+    body = (f"<div class='bank-num'>{sign}${abs(profit):,.0f}</div>"
+            f"<div class='bank-sub'>По {n} {_plural(n, 'сыгравшему движению', 'сыгравшим движениям', 'сыгравшим движениям')}, "
+            f"флэтом по ${int(m.get('stake') or 0)}. Оборот ${m.get('staked') or 0:,.0f}, "
+            f"доходность {m['roi_pct']:+.1f}%.</div>") if n else (
+            "<div class='bank-sub'>Ни одно движение ещё не сыграло — считать нечего.</div>")
+    return (
+        f"<div class='stat-row'>"
+        f"<div class='stat'><b>{m.get('total', 0)}</b><span>движений</span></div>"
+        f"<div class='stat'><b>{m.get('with_entry', 0)}</b><span>из них с входом</span></div>"
+        f"<div class='stat'><b>{m.get('resolved', 0)}</b><span>проверено</span></div>"
+        f"<div class='stat'><b>{wr}</b><span>заходимость</span></div>"
+        f"<div class='stat'><b>{m.get('total', 0) - (m.get('with_entry') or 0)}</b><span>взять было негде</span></div>"
+        f"</div>"
+        f"<div class='bank {cls}'><div class='bank-head'>Если бы мы <b>всегда</b> успевали "
+        f"взять коэффициент до падения, по ${int(m.get('stake') or 0)} на движение</div>{body}"
+        f"<div class='bank-note'>Это потолок, а не деньги. Цена до падения часто уже никем "
+        f"не даётся — именно поэтому такие движения и не стали сигналами. Смысл цифры в другом: "
+        f"если она в плюсе, значит логика «деньги зашли — ставим туда же» работает, и вопрос "
+        f"только в скорости. Если в минусе — ускоряться бессмысленно.</div></div>"
+    ).replace(",", " ")
+
+
 def _event_row(s: dict) -> str:
     """One compact row per event. Everything needed to act on it -- which side
     money went into, what the price was and is, how broad the move was, and
@@ -180,6 +264,15 @@ def _event_row(s: dict) -> str:
 
     name = f"{html.escape(s.get('home_team') or '?')} — {html.escape(s.get('away_team') or '?')}"
     outcome = html.escape(bet.get("name") or "—")
+
+    # A row can arrive here two ways: straight out of the poll that just ran,
+    # or out of the database because it was called earlier today. They look
+    # identical otherwise, so the badge is the only thing telling the reader
+    # which one is fresh.
+    badge = "<span class='chip fresh'>только что</span>" if s.get("fresh") else ""
+    res = {"hit": "<span class='chip win'>зашла</span>",
+           "miss": "<span class='chip lose'>не зашла</span>",
+           "n/a": "<span class='chip na'>не проверить</span>"}.get(s.get("result") or "", "")
 
     if has_entry:
         bet_cell = (f"<td class='c-bet'><span class='price'>{bet['entry_price']:.2f}</span>"
@@ -216,10 +309,10 @@ def _event_row(s: dict) -> str:
         # page that must render even if the script never runs, so it is never
         # hidden behind an animation.
         f"<tr class='row' data-stars='{stars}' data-open='{1 if has_entry else 0}' "
-        f"data-strat='{strategy}'>"
+        f"data-strat='{strategy}' data-fresh='{1 if s.get('fresh') else 0}'>"
         f"<td class='c-stars'>{'★' * stars}<span class='sr'>{stars} из 3</span></td>"
         f"<td class='c-ev'><b>{name}</b><small>{_fmt_start(s.get('start_time'))} UTC</small>"
-        f"{_countdown(s.get('start_time'))}</td>"
+        f"{_countdown(s.get('start_time'))}{badge}{res}</td>"
         f"<td class='c-out'>{outcome}<div class='tags'>{''.join(tags)}</div></td>"
         f"<td class='c-move'><span class='old'>{bet['old_price']:.2f}</span>"
         f"<span class='arr'>→</span><span class='new'>{bet['new_price']:.2f}</span>"
@@ -229,16 +322,80 @@ def _event_row(s: dict) -> str:
     )
 
 
-def _summaries_html(summaries: list, limit: int = 120) -> str:
-    shown = [s for s in summaries if s.get("bet")][:limit]
+def _row_to_summary(r) -> dict:
+    """Turn a stored tracked_alerts row back into the shape _event_row eats.
+
+    Cheaper and safer than a second row renderer: one template, one set of
+    columns, so the live rows and the ones read back from the database can
+    never drift apart visually.
+    """
+    old_p, new_p = r["old_price"], r["new_price"]
+    drop = ((old_p - new_p) / old_p * 100) if (old_p and new_p) else 0.0
+    opt = None
+    if r["opt_kind"]:
+        opt = {
+            "kind": r["opt_kind"],
+            "pick": r["opt_pick"] or "",
+            "price": r["opt_price"],
+            "est_price": r["opt_est_price"],
+            "note": r["opt_pick"] or "",
+        }
+    return {
+        "fixture_id": r["fixture_id"],
+        "home_team": r["home_team"],
+        "away_team": r["away_team"],
+        "start_time": r["start_time"],
+        "stars": r["stars"] or 0,
+        "strategy": r["strategy"] or "aggressive",
+        "has_entry": bool(r["entry_price"]),
+        "result": r["result"] if r["resolved"] else None,
+        "optimal": opt,
+        "bet": {
+            "name": r["outcome_name"], "side": r["outcome_id"],
+            "old_price": old_p or 0.0, "new_price": new_p or 0.0, "drop_pct": drop,
+            "down_count": r["down_count"] or 0, "books_count": r["books_count"] or 0,
+            "entry_price": r["entry_price"], "entry_book": r["entry_book"] or "",
+        },
+    }
+
+
+def _merge_feed(summaries: list, recent_rows, limit: int = 120) -> list:
+    """Current poll first, then everything else called in the last 24 hours.
+
+    Deduplicated on (event, side): a move that is still moving appears in both
+    sources, and the live copy wins because it carries the newer prices.
+    """
+    shown, seen = [], set()
+    for s in summaries:
+        if not s.get("bet"):
+            continue
+        key = (s.get("fixture_id"), (s.get("bet") or {}).get("side"))
+        if key in seen:
+            continue
+        seen.add(key)
+        s = dict(s)
+        s["fresh"] = True
+        shown.append(s)
+    for r in recent_rows or []:
+        key = (r["fixture_id"], r["outcome_id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        shown.append(_row_to_summary(r))
+    return shown[:limit]
+
+
+def _summaries_html(summaries: list, recent_rows=None, limit: int = 120) -> str:
+    shown = _merge_feed(summaries, recent_rows, limit)
     if not shown:
         return ("<div class='empty'><div class='empty-ico'>◎</div>"
-                "<p><b>Сейчас рынок стоит.</b></p>"
-                "<p>Ни одного падения от "
-                f"{SPIKE_THRESHOLD_PCT * 100:.0f}% за последний срез. "
+                "<p><b>За сутки ни одного сигнала.</b></p>"
+                "<p>Ни одно падение от "
+                f"{SPIKE_THRESHOLD_PCT * 100:.0f}% не дошло до входа за последние 24 часа. "
                 "Пустая страница здесь — это честный ответ, а не поломка: "
                 "мы не придумываем сигналы, чтобы заполнить место.</p></div>")
 
+    nfresh = sum(1 for s in shown if s.get("fresh"))
     n3 = sum(1 for s in shown if s["stars"] >= 3)
     n2 = sum(1 for s in shown if s["stars"] == 2)
     n1 = sum(1 for s in shown if s["stars"] == 1)
@@ -247,7 +404,8 @@ def _summaries_html(summaries: list, limit: int = 120) -> str:
 
     filters = (
         "<div class='toolbar'>"
-        f"<button class='f active' data-f='all'>Все<span class='n'>{len(shown)}</span></button>"
+        f"<button class='f active' data-f='all'>Все за сутки<span class='n'>{len(shown)}</span></button>"
+        f"<button class='f' data-f='fresh'>Только что<span class='n'>{nfresh}</span></button>"
         f"<button class='f' data-f='opt'>Оптимальная<span class='n'>{nopt}</span></button>"
         f"<button class='f' data-f='3'>★★★<span class='n'>{n3}</span></button>"
         f"<button class='f' data-f='2'>★★<span class='n'>{n2}</span></button>"
@@ -259,7 +417,8 @@ def _summaries_html(summaries: list, limit: int = 120) -> str:
     head = ("<tr><th><span class='sr'>Звёзды</span></th><th>Событие</th><th>Деньги зашли на</th>"
             "<th>Был → стал</th><th>Контор</th><th>Ставим</th></tr>")
     body = "".join(_event_row(s) for s in shown)
-    table = f"<div class='feed-wrap'><table class='feed'>{head}{body}</table></div>"
+    table = (f"<div class='feed-wrap'><table class='feed' id='feedtable'>"
+             f"{head}{body}</table></div>")
     empty = "<p class='norows' id='norows' hidden>Под этот фильтр ничего не подошло.</p>"
     return filters + table + empty
 
@@ -790,6 +949,11 @@ tbody tr:hover td,table tr.row:hover td{background:rgba(255,255,255,.022)}
 .c-bet .price{display:block;font-family:Unbounded,sans-serif;font-weight:900;font-size:24px;color:var(--lime);letter-spacing:-.01em;line-height:1.1}
 .c-bet small{display:block;color:var(--ink3);font-size:11.5px}
 .chip.shut{color:var(--ink3);font-size:12px;font-weight:600}
+.c-ev .chip{display:inline-block;margin-top:5px;margin-right:6px;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:800;letter-spacing:.04em;text-transform:uppercase}
+.c-ev .chip.fresh{background:rgba(200,255,46,.14);color:var(--lime);border:1px solid rgba(200,255,46,.35)}
+.c-ev .chip.win{background:rgba(60,220,130,.13);color:var(--good);border:1px solid rgba(60,220,130,.32)}
+.c-ev .chip.lose{background:rgba(255,61,129,.12);color:var(--bad);border:1px solid rgba(255,61,129,.3)}
+.c-ev .chip.na{background:rgba(255,255,255,.05);color:var(--ink3);border:1px solid var(--line)}
 .c-bet .price.est{color:var(--cy)}
 .mono{font-family:var(--mono);font-size:15px;font-weight:700;color:var(--cy)}
 .hit{color:var(--good);font-weight:600}
@@ -834,7 +998,9 @@ ul.mini li:last-child{border-bottom:0;padding-bottom:0}
 .bank-num{font-family:Unbounded,sans-serif;font-weight:900;font-size:34px;margin:6px 0 4px;
   font-variant-numeric:tabular-nums}
 .bank.good .bank-num{color:var(--good)} .bank.bad .bank-num{color:var(--bad)}
-.bank-sub{font-size:13px;color:var(--ink2)} .bank-note{font-size:11.5px;color:var(--ink3);margin-top:8px}
+.bank-sub{font-size:13px;color:var(--ink2)}
+.pnl{display:block;font-family:var(--mono);font-weight:800;font-size:13px;margin-top:3px}
+.pnl.good{color:var(--good)} .pnl.bad{color:var(--bad)} .bank-note{font-size:11.5px;color:var(--ink3);margin-top:8px}
 
 .last5{display:grid;gap:8px;margin-top:14px}
 .bet{background:var(--card);border:1px solid var(--line);border-radius:13px;overflow:hidden}
@@ -902,6 +1068,7 @@ footer a{color:var(--ink2)}
     <span class="sp"></span>
     <a class="link" href="#feed">Сигналы</a>
     <a class="link" href="#active">Открытые</a>
+    <a class="link" href="#moves">Движения</a>
     <a class="link" href="#proof">Проверка</a>
     <a class="link" href="#how">Как это работает</a>
     <span class="pill $freshness_class"><span class="dot"></span>$freshness_label</span>
@@ -962,10 +1129,11 @@ $ticker
   $funnel_block
 
   <h2 id="feed"><span class="hash">#</span>Сигналы</h2>
-  <p class="lead">Что шевельнулось в <b>последнем срезе</b> рынка — окно шириной
-  $poll_interval мин, поэтому чаще всего здесь пусто. Строка попадает сюда, даже если
-  входа уже нет: в колонке «ставим» тогда стоит <b>⛔ закрыт</b>, и в открытые ставки
-  такое событие не уходит. Именно поэтому в двух блоках бывают разные числа.</p>
+  <p class="lead">Все сигналы за <b>последние 24 часа</b> — то же, что ушло в бот.
+  Пришедшие в последнем срезе помечены <b>«только что»</b>, их можно отфильтровать
+  кнопкой. Строка попадает сюда, даже если входа уже нет: в колонке «ставим» тогда
+  стоит <b>⛔ закрыт</b>, и в открытые ставки такое событие не уходит — поэтому
+  в двух блоках бывают разные числа.</p>
   $summaries_html
 
   <h2 id="active"><span class="hash">#</span>Открытые ставки</h2>
@@ -973,6 +1141,13 @@ $ticker
   Блок выше показывает только то, что шевельнулось в последнем срезе (это окно в
   $poll_interval мин, и чаще всего оно пустое). Здесь — всё, на чём мы сейчас стоим.</p>
   $active_signals
+
+  <h2 id="moves"><span class="hash">#</span>Движения</h2>
+  <p class="lead">Каждое падение от $threshold_pct%, которое мы поймали — включая те,
+  где взять старую цену было уже негде. Колонка <b>«коэф. до падения»</b> — это цифра,
+  которую мы бы забрали, если бы успевали всегда.</p>
+  $movement_stats
+  $movements_table
 
   <h2 id="how"><span class="hash">#</span>Как это работает</h2>
   <div class="bento">
@@ -1088,14 +1263,17 @@ SCRIPTS = Template(r"""<script>
   setTimeout(function () { location.reload(); }, 5 * 60000);
 
   /* ------------------------------------------------------------ filters */
+  /* Scoped to the signal feed on purpose: 'tr.row' also matches the open-bets
+     and movements tables, and an unscoped filter used to blank those too. */
   var buttons = document.querySelectorAll('.f'),
-      rows = document.querySelectorAll('tr.row'),
+      rows = document.querySelectorAll('#feedtable tr.row'),
       norows = document.getElementById('norows');
   function apply(mode) {
     var shown = 0;
     rows.forEach(function (r) {
       var ok;
       if (mode === 'all') ok = true;
+      else if (mode === 'fresh') ok = r.dataset.fresh === '1';
       else if (mode === 'open') ok = r.dataset.open === '1';
       else if (mode === 'opt') ok = r.dataset.strat === 'optimal';
       else ok = r.dataset.stars === mode;
@@ -1259,7 +1437,7 @@ def render_dashboard(summaries: list, quota: dict = None):
         cov_signals=cov["signals"], cov_signals_txt=_num(cov["signals"]),
         funnel_block=_funnel_block(storage.funnel_stats(24), span_label),
         ticker=_ticker(summaries),
-        summaries_html=_summaries_html(summaries),
+        summaries_html=_summaries_html(summaries, storage.recent_signals(24)),
         top_books=_top_books(storage.top_books(10)),
         stats_aggressive=_strategy_card(
             aggressive, "Агрессивная",
@@ -1270,6 +1448,8 @@ def render_dashboard(summaries: list, quota: dict = None):
             f"До {OPTIMAL_MAX_PRICE:g} — та же ставка. Выше — вход мягче: двойной шанс в футболе, фора там, где ничьей нет.", "opt",
             storage.recent_bets(5, "prematch", "optimal")),
         resolved_table=_resolved_table(aggressive),
+        movements_table=_movements_table(storage.recent_movements(30)),
+        movement_stats=_movement_stats(storage.movement_stats()),
         active_signals=_active_signals(active),
         active_n=len(active),
         active_word=_plural(len(active), "ставка", "ставки", "ставок"),

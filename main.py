@@ -105,6 +105,12 @@ def run_once():
                  if s.get("alertable")
                  and storage.save_bet_alert(s, fetched_at, POLL_INTERVAL_MINUTES))
 
+    # Every move that cleared the threshold, signal or not. Priced at the
+    # pre-drop coefficient, this is the ceiling the strategy is worth when
+    # execution is free -- the benchmark the real, bettable numbers are
+    # measured against.
+    moves_logged = sum(1 for s in summaries if storage.save_movement(s, fetched_at))
+
     notifier.notify_summaries(summaries, dashboard_url=DASHBOARD_URL)
 
     # Costs quota (one scores call per sport with pending alerts), so this is
@@ -140,7 +146,7 @@ def run_once():
         f"{len(esports_records)} esports/table-tennis lines via OddsPapi, "
         f"{len(records)} lines total, {len(summaries)} events moved {SPIKE_THRESHOLD_PCT*100:.0f}%+, "
         f"{actionable} with an open entry ({optimal} optimal), {starred} at 3 stars, "
-        f"{logged} new bets logged, {newly_resolved} resolved, "
+        f"{logged} new bets logged, {moves_logged} moves logged, {newly_resolved} resolved, "
         f"{pruned} old rows pruned, dashboard -> {path}"
     )
     return summaries

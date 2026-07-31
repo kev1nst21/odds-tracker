@@ -1,0 +1,108 @@
+"""Offline check for the ДВИЖЕНИЯ block and the 24h signal feed.
+
+Runs against a throwaway database so it can be executed anywhere, including
+CI, without touching real history. Verifies the two things that are easy to
+get silently wrong: the flat-stake P&L must be priced at the PRE-drop
+coefficient (that is the whole point of the movements table), and a signal
+logged an hour ago must still appear in the feed even though the current poll
+returned nothing.
+"""
+import os
+import tempfile
+from datetime import datetime, timedelta, timezone
+
+os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(), "test.db")
+os.environ.setdefault("DASHBOARD_DIR", tempfile.mkdtemp())
+
+import config  # noqa: E402
+config.DB_PATH = os.environ["DB_PATH"]
+
+import storage  # noqa: E402
+import dashboard  # noqa: E402
+
+storage.DB_PATH = config.DB_PATH
+storage.init_db()
+
+now = datetime.now(timezone.utc)
+soon = (now + timedelta(hours=3)).isoformat()
+past = (now - timedelta(hours=6)).isoformat()
+
+
+def summary(fid, home, away, side, name, old, new, entry, book, stars, start, opt=None):
+    return {
+        "fixture_id": fid, "sport_key": "tennis_atp", "start_time": start,
+        "home_team": home, "away_team": away, "stars": stars,
+        "has_entry": entry is not None, "alertable": entry is not None,
+        "strategy": "optimal" if opt and opt["kind"] == "straight" else "aggressive",
+        "bet": {"side": side, "name": name, "old_price": old, "new_price": new,
+                "drop_pct": (old - new) / old * 100, "down_count": 5, "books_count": 9,
+                "entry_price": entry, "entry_book": book,
+                "market_id": "h2h", "player_key": None},
+        "optimal": opt,
+    }
+
+
+# 1. a move that became a real signal, match already played
+won = summary("f1", "Cocciaretto", "Osaka", "away", "Naomi Osaka",
+              5.50, 4.75, 5.70, "winamax_de", 2, past,
+              {"kind": "set_handicap", "pick": "фора по сетам +1.5 ≈ 1.62",
+               "price": None, "est_price": 1.62, "gradeable": True, "note": "теннис"})
+# 2. a move where the old price was gone everywhere -- movement only, no signal
+shut = summary("f2", "Alcaraz", "Rune", "home", "Carlos Alcaraz",
+               2.40, 2.05, None, None, 3, past)
+# 3. a signal logged an hour ago whose match has NOT started -- the Osaka case
+open_ = summary("f3", "Hapoel", "Red Star", "home", "Hapoel Be'er Sheva",
+                3.45, 3.10, 3.35, "unibet_se", 2, soon,
+                {"kind": "double_chance", "pick": "1X двойной шанс", "price": 1.68,
+                 "est_price": None, "gradeable": True, "note": "двойной шанс"})
+
+detected = (now - timedelta(hours=1)).isoformat()
+for s in (won, shut, open_):
+    if s["alertable"]:
+        storage.save_bet_alert(s, detected, 3)
+    storage.save_movement(s, detected)
+
+# dedup: the same move seen again next poll must not create a second row
+assert storage.save_movement(won, now.isoformat()) is False, "movement dedup broken"
+
+# grade: #1 won at 5.50, #2 lost at 2.40
+mv = {r["fixture_id"]: r["id"] for r in storage.get_unresolved_movements(now.isoformat())}
+storage.mark_movement_resolved(mv["f1"], "hit", now.isoformat())
+storage.mark_movement_resolved(mv["f2"], "miss", now.isoformat())
+
+m = storage.movement_stats()
+stake = m["stake"]
+expected = stake * (5.50 - 1) - stake
+assert m["total"] == 3, m
+assert m["with_entry"] == 2, m
+assert m["graded_n"] == 2, m
+assert abs(m["profit"] - expected) < 1e-6, (m["profit"], expected)
+assert abs(m["win_rate"] - 50.0) < 1e-6, m
+print(f"movements ok: {m['total']} moves, P&L {m['profit']:+.0f} at ${stake:.0f} "
+      f"(priced at the pre-drop coefficient, expected {expected:+.0f})")
+
+# the feed must still show the hour-old signals when the current poll is empty
+feed = dashboard._summaries_html([], storage.recent_signals(24))
+assert "Osaka" in feed, "an hour-old signal fell out of the feed"
+assert "Hapoel" in feed, "an hour-old signal fell out of the feed"
+assert "только что" not in feed, "nothing is fresh in this poll"
+print("feed ok: hour-old signals visible with an empty poll")
+
+# and a live move must be marked fresh and not duplicated by its stored copy
+live = dashboard._summaries_html([open_], storage.recent_signals(24))
+assert live.count("Red Star") == 1, "live row duplicated by its database copy"
+assert "только что" in live, "live row not marked fresh"
+print("feed ok: live row deduplicated against the database and tagged fresh")
+
+html = dashboard._movements_table(storage.recent_movements(30))
+assert "Osaka" in html and "5.50" in html, "movements table missing the caught price"
+print("movements table ok")
+print(dashboard._movement_stats(m)[:160].replace("<", " <"))
+
+# and the whole page must build with these rows in it
+path = dashboard.render_dashboard([open_], quota={"remaining": 1234, "used": 10})
+page = open(path, encoding="utf-8").read()
+for needle in ("Движения", "только что", "feedtable", "Osaka",
+               "коэф. до падения", "Все за сутки", "Hapoel"):
+    assert needle in page, f"page is missing: {needle}"
+print(f"page ok: {len(page)} bytes, all blocks present -> {path}")

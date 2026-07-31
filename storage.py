@@ -102,6 +102,40 @@ CREATE INDEX IF NOT EXISTS idx_tracked_alerts_lookup
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tracked_alerts_dedup
     ON tracked_alerts (kind, fixture_id, outcome_id);
 
+-- One row per MOVEMENT -- every drop that cleared the threshold, whether or
+-- not a bookmaker was still offering the old price. tracked_alerts only holds
+-- the ones we could actually bet; this table holds all of them, priced at
+-- old_price, i.e. "what if we always caught the coefficient before it fell".
+-- That number is a ceiling, not money: it is what the money-flow thesis is
+-- worth when execution is free. Comparing it with tracked_alerts is how we
+-- tell "the idea is wrong" apart from "the idea is right but we're too slow".
+CREATE TABLE IF NOT EXISTS movements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    detected_at TEXT NOT NULL,
+    fixture_id TEXT NOT NULL,
+    sport_key TEXT,
+    start_time TEXT,
+    home_team TEXT,
+    away_team TEXT,
+    outcome_id TEXT NOT NULL,
+    outcome_name TEXT,
+    stars INTEGER,
+    old_price REAL,          -- the coefficient we would have caught
+    new_price REAL,
+    drop_pct REAL,
+    down_count INTEGER,
+    books_count INTEGER,
+    had_entry INTEGER,       -- was it also a real signal?
+    entry_price REAL,
+    resolved INTEGER NOT NULL DEFAULT 0,
+    result TEXT,
+    resolved_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_movements_dedup
+    ON movements (fixture_id, outcome_id);
+CREATE INDEX IF NOT EXISTS idx_movements_open
+    ON movements (resolved, start_time);
+
 -- One row per poll: how many events the market moved, and where each one
 -- stopped being a signal. Without this the header can only say "22 движения"
 -- and "1 сигнал", which reads as a bug rather than as a filter doing its job.
@@ -191,6 +225,89 @@ def init_db():
         conn.executescript(SCHEMA)
         _migrate(conn)
         conn.commit()
+
+
+def save_movement(summary: dict, detected_at: str) -> bool:
+    """Log a market move, signal or not. One row per event+side, ever."""
+    bet = summary.get("bet") or {}
+    if not bet.get("old_price"):
+        return False
+    with _conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO movements
+                (detected_at, fixture_id, sport_key, start_time, home_team, away_team,
+                 outcome_id, outcome_name, stars, old_price, new_price, drop_pct,
+                 down_count, books_count, had_entry, entry_price)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (detected_at, summary["fixture_id"], summary.get("sport_key"),
+             summary.get("start_time"), summary.get("home_team"), summary.get("away_team"),
+             bet["side"], bet["name"], summary.get("stars"),
+             bet.get("old_price"), bet.get("new_price"), bet.get("drop_pct"),
+             bet.get("down_count"), bet.get("books_count"),
+             1 if summary.get("has_entry") else 0, bet.get("entry_price")),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def get_unresolved_movements(before_iso: str, limit: int = 300):
+    with _conn() as conn:
+        return conn.execute(
+            "SELECT id, fixture_id, sport_key, home_team, away_team, outcome_id "
+            "FROM movements WHERE resolved=0 AND start_time IS NOT NULL AND start_time < ? "
+            "ORDER BY start_time ASC LIMIT ?", (before_iso, limit),
+        ).fetchall()
+
+
+def mark_movement_resolved(mid: int, result: str, resolved_at: str):
+    with _conn() as conn:
+        conn.execute("UPDATE movements SET resolved=1, result=?, resolved_at=? WHERE id=?",
+                     (result, resolved_at, mid))
+        conn.commit()
+
+
+def movement_stats():
+    """Flat-stake result of backing EVERY move at the pre-drop coefficient.
+
+    Deliberately priced at old_price, which is frequently a price nobody was
+    still offering by the time we saw the move. So this is an upper bound on
+    the idea, not a claim about achievable money -- and the site says so next
+    to the number.
+    """
+    with _conn() as conn:
+        total = conn.execute("SELECT COUNT(*) n FROM movements").fetchone()["n"]
+        with_entry = conn.execute("SELECT COUNT(*) n FROM movements WHERE had_entry=1").fetchone()["n"]
+        resolved = conn.execute("SELECT COUNT(*) n FROM movements WHERE resolved=1").fetchone()["n"]
+        hits = conn.execute("SELECT COUNT(*) n FROM movements WHERE result='hit'").fetchone()["n"]
+        misses = conn.execute("SELECT COUNT(*) n FROM movements WHERE result='miss'").fetchone()["n"]
+        graded = conn.execute(
+            "SELECT result, old_price FROM movements "
+            "WHERE resolved=1 AND result IN ('hit','miss') AND old_price IS NOT NULL"
+        ).fetchall()
+    profit = 0.0
+    for g in graded:
+        profit += FLAT_STAKE * (g["old_price"] - 1) if g["result"] == "hit" else -FLAT_STAKE
+    staked = FLAT_STAKE * len(graded)
+    return {
+        "total": total, "with_entry": with_entry, "resolved": resolved,
+        "hits": hits, "misses": misses,
+        "win_rate": (hits / (hits + misses) * 100) if (hits + misses) else None,
+        "graded_n": len(graded), "staked": staked, "profit": profit,
+        "roi_pct": (profit / staked * 100) if staked else None,
+        "stake": FLAT_STAKE,
+    }
+
+
+def recent_movements(limit: int = 30):
+    with _conn() as conn:
+        return conn.execute(
+            "SELECT detected_at, fixture_id, sport_key, start_time, home_team, away_team, "
+            "       outcome_name, stars, old_price, new_price, drop_pct, down_count, "
+            "       books_count, had_entry, entry_price, resolved, result "
+            "FROM movements ORDER BY detected_at DESC LIMIT ?", (limit,),
+        ).fetchall()
 
 
 def save_funnel(counts: dict, at: str):
@@ -630,6 +747,32 @@ def recent_bets(limit: int = 5, kind: str = "prematch", strategy: str = None):
         ).fetchall()
 
 
+def recent_signals(hours: int = 24, limit: int = 60, kind: str = "prematch"):
+    """Every signal we called in the last N hours, finished or not.
+
+    Added 2026-07-31. The feed used to render only the current poll's
+    summaries -- a three-minute window -- so a signal sent an hour ago was
+    nowhere on the page under the heading "Сигналы", even though it was in
+    the database, in the bot and in the open-bets block. That reads as a lost
+    signal. This is the list the word "сигналы" actually means to a reader.
+    """
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    with _conn() as conn:
+        return conn.execute(
+            """
+            SELECT fixture_id, sport_key, home_team, away_team, outcome_id, outcome_name,
+                   stars, down_count, books_count, old_price, new_price, entry_price,
+                   entry_book, start_time, detected_at, strategy, resolved, result,
+                   opt_kind, opt_pick, opt_price, opt_book, opt_gradeable, opt_est_price,
+                   opt_result
+            FROM tracked_alerts
+            WHERE kind=? AND detected_at >= ?
+            ORDER BY detected_at DESC LIMIT ?
+            """,
+            (kind, since, limit),
+        ).fetchall()
+
+
 def active_signals(limit: int = 40, kind: str = "prematch"):
     """Signals whose match hasn't kicked off yet -- the ones still live.
 
@@ -736,10 +879,12 @@ def coverage_stats(hours: int = 24):
             "MAX(fetched_at) AS last_at "
             "FROM odds_snapshots WHERE fetched_at>=?", (since,),
         ).fetchone()
+        # Counted from the movements table, which is exactly the list the
+        # "Движения" section on the site prints. It used to come from
+        # spike_events, and the two disagreed -- the header claimed 22 moves
+        # while the page could show none of them, which reads as invented.
         moves = conn.execute(
-            "SELECT COUNT(*) AS n FROM ("
-            "  SELECT DISTINCT fixture_id, outcome_id FROM spike_events"
-            "  WHERE detected_at>=? AND direction='down')", (since,),
+            "SELECT COUNT(*) AS n FROM movements WHERE detected_at>=?", (since,),
         ).fetchone()["n"]
         signals = conn.execute(
             "SELECT COUNT(*) AS n FROM tracked_alerts WHERE detected_at>=?", (since,),

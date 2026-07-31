@@ -154,7 +154,32 @@ def check_pending_results(now: datetime = None) -> int:
                                               (home_score, away_score)))
         resolved_count += 1
 
+    resolved_count += _resolve_movements(scores_by_fixture, now)
     return resolved_count
+
+
+def _resolve_movements(scores_by_fixture, now):
+    """Grade the movements table -- every detected move, not just the ones we
+    could bet. Same rule as a signal: we back the side money went into, so it
+    wins exactly when that side wins."""
+    cutoff = (now - timedelta(hours=RESULT_CHECK_DELAY_HOURS)).isoformat()
+    done = 0
+    for row in storage.get_unresolved_movements(cutoff):
+        if row["sport_key"] in ODDSPAPI_SPORT_KEYS:
+            continue
+        ev = scores_by_fixture.get(row["fixture_id"])
+        if not ev or not ev.get("completed"):
+            continue
+        hs, as_ = _extract_scores(ev, row["home_team"], row["away_team"])
+        winner = _winner_from_scores(hs, as_)
+        side = row["outcome_id"]
+        if winner is None or side not in _VALID_SIDES:
+            result = "n/a"
+        else:
+            result = "hit" if side == winner else "miss"
+        storage.mark_movement_resolved(row["id"], result, now.isoformat())
+        done += 1
+    return done
 
 
 def _optimal_result(row, winner, side, straight_result, scores=None):
