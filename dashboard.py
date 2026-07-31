@@ -107,6 +107,36 @@ def _ago(value, now=None) -> str:
 # feed
 # --------------------------------------------------------------------------
 
+def _countdown(start_iso) -> str:
+    """A live 'until kick-off' badge.
+
+    Rendered server-side with a sensible value AND given the raw timestamp so
+    the script can keep counting -- the page is a static file that may be
+    minutes old, and a frozen "через 2 ч" on a match starting in 40 minutes is
+    worse than no timer at all. If the script never runs, the server-rendered
+    text is still correct as of publication.
+    """
+    dt = _parse_iso(start_iso)
+    if not dt:
+        return ""
+    left = (dt - datetime.now(timezone.utc)).total_seconds()
+    if left <= 0:
+        return "<span class='cd-to live' data-start=''>матч идёт</span>"
+    return (f"<span class='cd-to' data-start='{dt.isoformat()}'>"
+            f"{_left_words(left)}</span>")
+
+
+def _left_words(seconds: float) -> str:
+    mins = int(seconds // 60)
+    if mins < 60:
+        return f"через {mins} мин"
+    hours, mins = divmod(mins, 60)
+    if hours < 24:
+        return f"через {hours} ч {mins:02d} мин"
+    days, hours = divmod(hours, 24)
+    return f"через {days} {_plural(days, 'день', 'дня', 'дней')} {hours} ч"
+
+
 def _event_row(s: dict) -> str:
     """One compact row per event. Everything needed to act on it -- which side
     money went into, what the price was and is, how broad the move was, and
@@ -152,7 +182,8 @@ def _event_row(s: dict) -> str:
         f"<tr class='row' data-stars='{stars}' data-open='{1 if has_entry else 0}' "
         f"data-strat='{strategy}'>"
         f"<td class='c-stars'>{'★' * stars}<span class='sr'>{stars} из 3</span></td>"
-        f"<td class='c-ev'><b>{name}</b><small>{_fmt_start(s.get('start_time'))} UTC</small></td>"
+        f"<td class='c-ev'><b>{name}</b><small>{_fmt_start(s.get('start_time'))} UTC</small>"
+        f"{_countdown(s.get('start_time'))}</td>"
         f"<td class='c-out'>{outcome}<div class='tags'>{''.join(tags)}</div></td>"
         f"<td class='c-move'><span class='old'>{bet['old_price']:.2f}</span>"
         f"<span class='arr'>→</span><span class='new'>{bet['new_price']:.2f}</span>"
@@ -265,7 +296,8 @@ def _active_signals(rows) -> str:
         items.append(
             f"<tr class='row'><td class='c-stars'>{'★' * (r['stars'] or 0)}</td>"
             f"<td class='c-ev'><b>{html.escape(event)}</b>"
-            f"<small>старт {_fmt_start(r['start_time'])} UTC</small></td>"
+            f"<small>старт {_fmt_start(r['start_time'])} UTC</small>"
+            f"{_countdown(r['start_time'])}</td>"
             f"<td class='c-out'>{html.escape(r['outcome_name'] or '')}</td>"
             f"<td class='c-move'><span class='old'>{old_p}</span><span class='arr'>→</span>"
             f"<span class='new'>{new_p}</span></td>"
@@ -339,7 +371,7 @@ def _mini_signals(rows, strategy: str = "aggressive") -> str:
         items.append(
             f"<li><span class='ms-ev'><b>{html.escape(event)}</b>"
             f"<small>{html.escape(pick)} · {old_p} → {new_p} · "
-            f"взяли <b>{entry}</b></small></span>{st}</li>"
+            f"взяли <b>{entry}</b></small>{_countdown(r['start_time'])}</span>{st}</li>"
         )
     return "<ul class='mini'>" + "".join(items) + "</ul>"
 
@@ -680,6 +712,9 @@ tbody tr:hover td,table tr.row:hover td{background:rgba(255,255,255,.022)}
 .c-stars{color:var(--warn);white-space:nowrap;letter-spacing:1px;font-size:13px}
 .c-ev b{display:block;font-weight:600}
 .c-ev small{display:block;color:var(--ink3);font-size:11.5px;font-family:var(--mono)}
+.cd-to{display:inline-block;margin-top:4px;font-size:11px;font-weight:700;font-family:var(--mono);padding:2px 7px;border-radius:6px;background:rgba(74,217,255,.1);color:var(--cy);white-space:nowrap}
+.cd-to.soon{background:rgba(255,197,49,.13);color:var(--warn)}
+.cd-to.live{background:rgba(255,61,129,.13);color:var(--mag)}
 .c-out{font-weight:600}
 .tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px}
 .tag{font-size:9.5px;font-weight:800;letter-spacing:.09em;padding:3px 7px;border-radius:6px;
@@ -869,8 +904,10 @@ $ticker
   и множителей. Прямо сейчас открытых входов: <b>$hero_open</b>, из них на три звезды: <b>$hero_stars</b>.</p>
 
   <h2 id="feed"><span class="hash">#</span>Сигналы</h2>
-  <p class="lead">Одна строка — одно событие. «Был → стал» это цена до денег и после,
-  «конторы» — сколько из них уже подвинулось, «ставим» — где старую цену ещё дают.</p>
+  <p class="lead">Что шевельнулось в <b>последнем срезе</b> рынка — окно шириной
+  $poll_interval мин, поэтому чаще всего здесь пусто. Строка попадает сюда, даже если
+  входа уже нет: в колонке «ставим» тогда стоит <b>⛔ закрыт</b>, и в открытые ставки
+  такое событие не уходит. Именно поэтому в двух блоках бывают разные числа.</p>
   $summaries_html
 
   <h2 id="active"><span class="hash">#</span>Открытые ставки</h2>
@@ -1077,6 +1114,35 @@ SCRIPTS = Template(r"""<script>
       b.setAttribute('aria-expanded', box.hidden ? 'false' : 'true');
     });
   });
+
+
+  /* --------------------------------------------------- time to kick-off */
+  /* Server-rendered text is right at publication time; this keeps it right
+     afterwards. Under an hour the badge turns amber, because that is when
+     "still open" stops being a comfortable assumption. */
+  var cds = document.querySelectorAll('.cd-to[data-start]');
+  function words(sec) {
+    var m = Math.floor(sec / 60);
+    if (m < 60) return 'через ' + m + ' мин';
+    var h = Math.floor(m / 60); m = m % 60;
+    if (h < 24) return 'через ' + h + ' ч ' + String(m).padStart(2, '0') + ' мин';
+    var d = Math.floor(h / 24); h = h % 24;
+    var word = d % 10 === 1 && d % 100 !== 11 ? 'день'
+             : (d % 10 >= 2 && d % 10 <= 4 && !(d % 100 >= 12 && d % 100 <= 14)) ? 'дня' : 'дней';
+    return 'через ' + d + ' ' + word + ' ' + h + ' ч';
+  }
+  function ticks() {
+    var now = Date.now();
+    cds.forEach(function (el) {
+      var t = Date.parse(el.dataset.start || '');
+      if (isNaN(t)) return;
+      var left = (t - now) / 1000;
+      if (left <= 0) { el.textContent = 'матч идёт'; el.className = 'cd-to live'; return; }
+      el.textContent = words(left);
+      el.className = 'cd-to' + (left < 3600 ? ' soon' : '');
+    });
+  }
+  if (cds.length) { ticks(); setInterval(ticks, 1000); }
 
   /* -------------------------------------------------------------- sound */
   /* Browsers will not let any page make unmuted sound without a gesture --

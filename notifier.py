@@ -14,7 +14,7 @@ bet are sent -- a move you can no longer get on is not worth a notification,
 and neither is a 1% drift.
 """
 import html
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests
 
@@ -39,6 +39,26 @@ def _fmt_start(iso: str) -> str:
         return str(iso)
 
 
+def _left(iso: str) -> str:
+    """" · через 3 ч 40 мин" -- how long until kick-off, or nothing if unknown."""
+    if not iso:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    secs = (dt - datetime.now(timezone.utc)).total_seconds()
+    if secs <= 0:
+        return " · матч уже начался"
+    mins = int(secs // 60)
+    if mins < 60:
+        return f" · через {mins} мин"
+    hours, mins = divmod(mins, 60)
+    if hours < 24:
+        return f" · через {hours} ч {mins:02d} мин"
+    return f" · через {hours // 24} дн {hours % 24} ч"
+
+
 def _format_event(s: dict) -> str:
     bet = s.get("bet") or {}
     home = html.escape(s.get("home_team") or "?")
@@ -49,7 +69,9 @@ def _format_event(s: dict) -> str:
 
     lines = [f"{stars} <b>{home} — {away}</b>".strip()]
     if start:
-        lines.append(f"<i>старт {html.escape(start)}</i>")
+        # Time left matters more than the clock time: it decides whether this
+        # is something to act on now or to note for later.
+        lines.append(f"<i>старт {html.escape(start)}{_left(s.get('start_time'))}</i>")
 
     lines.append("")
     lines.append(f"💰 Деньги зашли на: <b>{name}</b>")
