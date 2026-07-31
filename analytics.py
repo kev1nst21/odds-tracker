@@ -339,8 +339,20 @@ def _optimal_play(bet: dict, safe: dict):
     }
 
 
+# Filled in by every call to build_event_summaries(). Answers the question
+# that matters most when the bot is quiet: of everything the market did this
+# cycle, where exactly did it stop being a signal? Without this the only
+# visible fact is "0 сигналов", which is indistinguishable from a broken
+# pipeline -- and guessing which filter is too strict is how you end up
+# loosening the wrong one.
+LAST_FUNNEL = {}
+
+
 def build_event_summaries(records: list, spikes: list = None, movements: list = None) -> list:
     """One dict per event, most actionable first."""
+    funnel = {"events": 0, "with_drop": 0, "big_drop": 0,
+              "thin_market": 0, "all_books_moved": 0, "entry_too_low": 0,
+              "price_out_of_range": 0, "signals": 0}
     spikes = spikes or []
     movements = movements if movements is not None else spikes
 
@@ -396,6 +408,8 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
             sharp_down = any(b in ASIAN_SHARP_BOOKMAKERS for b in down_books)
 
             old_price = new_price = drop_pct = None
+            entry_floor = best_left = None
+            left_count = 0
             entries = []
             if dropped:
                 # MEDIANS, not max-of-old and min-of-new.
@@ -424,11 +438,15 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
                     new_price + (old_price - new_price) * (ENTRY_MIN_CAPTURE_PCT / 100.0),
                 )
                 ceiling = old_price * (1 + ENTRY_MAX_OVER_OLD_PCT / 100.0)
+                left = {b: p for b, p in prices_by_book.items() if b not in down_books}
                 entries = sorted(
-                    ((b, p) for b, p in prices_by_book.items()
-                     if b not in down_books and floor <= p <= ceiling),
+                    ((b, p) for b, p in left.items() if floor <= p <= ceiling),
                     key=lambda bp: -bp[1],
                 )
+                # Kept so the funnel below can say WHY an entry was refused
+                # rather than just that there wasn't one.
+                entry_floor, left_count = floor, len(left)
+                best_left = max(left.values()) if left else None
 
             fair_price = fair.get(side)
             outcomes.append({
@@ -451,6 +469,9 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
                 "entry_book": entries[0][0] if entries else None,
                 "entry_gap_pct": ((entries[0][1] / new_price - 1) * 100)
                                  if entries and new_price else None,
+                "entry_floor": entry_floor,
+                "left_count": left_count,
+                "best_left_price": best_left,
             })
 
         outcomes.sort(key=lambda o: _SIDE_ORDER.get(o["side"], 9))
@@ -470,6 +491,25 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
         if shortening:
             bet = max(shortening, key=lambda o: (o["spiked"], o["down_count"],
                                                  -(o["drop_pct"] or 0)))
+
+        # --- funnel bookkeeping -------------------------------------------
+        funnel["events"] += 1
+        dropping = [o for o in outcomes if o["down_count"] > 0]
+        if dropping:
+            funnel["with_drop"] += 1
+        big = [o for o in dropping
+               if abs(o["drop_pct"] or 0) >= SPIKE_THRESHOLD_PCT * 100]
+        if big:
+            funnel["big_drop"] += 1
+            lead = max(big, key=lambda o: abs(o["drop_pct"] or 0))
+            if lead["thin_market"]:
+                funnel["thin_market"] += 1
+            elif lead["left_count"] == 0:
+                funnel["all_books_moved"] += 1
+            elif not lead["entries"]:
+                funnel["entry_too_low"] += 1
+            else:
+                funnel["signals"] += 1
 
         has_entry = bool(bet and bet["entry_price"])
         stars = bet["stars"] if bet else 0
@@ -512,6 +552,9 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
             "optimal": optimal,
             "verdict": _verdict(bet, has_entry, safe, optimal),
         })
+
+    LAST_FUNNEL.clear()
+    LAST_FUNNEL.update(funnel)
 
     # Sub-threshold drift is dropped entirely rather than shown greyed out.
     # The user's instruction is explicit: "мы не ищем меньше 10%... нам не

@@ -116,6 +116,16 @@ def run_once():
     # pruned -- they are the track record.
     pruned = storage.prune_snapshots(SNAPSHOT_RETENTION_HOURS)
 
+    # Where the market's activity stopped being a signal. Printed every cycle
+    # because "0 сигналов" on its own is indistinguishable from a broken
+    # pipeline, and the only way to tune a filter honestly is to see how many
+    # events each one is actually eating.
+    f = analytics.LAST_FUNNEL
+    print(f"[funnel] событий {f.get('events',0)} → просело {f.get('with_drop',0)} → "
+          f"от 10% {f.get('big_drop',0)} → отсев: рынок мал {f.get('thin_market',0)}, "
+          f"просело у всех {f.get('all_books_moved',0)}, вход не дотянул "
+          f"{f.get('entry_too_low',0)} → сигналов {f.get('signals',0)}")
+
     path = dashboard.render_dashboard(summaries, quota=odds_client.LAST_QUOTA)
 
     actionable = sum(1 for s in summaries if s.get("alertable"))
