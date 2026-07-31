@@ -25,6 +25,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from string import Template
 
+import analytics
 import storage
 from config import (
     DASHBOARD_PATH,
@@ -201,8 +202,14 @@ def _event_row(s: dict) -> str:
         tags.append(f"<span class='tag opt' title='{html.escape(opt.get('note') or '')}'>"
                     f"ОПТИМАЛЬНАЯ — двойной шанс {opt['price']:.2f}</span>")
     else:
+        # Even without a quoted price the tag carries a number, because
+        # "фора по сетам" with no figure is not something anyone can act on.
+        # The hint text already carries the figure for tennis, so only add one
+        # when it doesn't -- otherwise the tag reads "≈ 2.17  ~2.17".
+        est = opt.get("est_price")
+        shown = f" ~{est:.2f}" if est and "≈" not in (opt.get("pick") or "") else ""
         tags.append(f"<span class='tag safe' title='{html.escape(opt.get('note') or '')}'>"
-                    f"🛡 ОПТИМАЛЬНАЯ — {html.escape(opt['pick'])[:44]}</span>")
+                    f"🛡 ОПТИМАЛЬНАЯ — {html.escape(opt['pick'])[:40]}{shown}</span>")
 
     return (
         # Deliberately NOT a .reveal element: the feed is the one thing on the
@@ -315,13 +322,13 @@ def _active_signals(rows) -> str:
         elif kind and r["opt_price"]:
             opt_cell = (f"<span class='price'>{r['opt_price']:.2f}</span>"
                         f"<small>{html.escape(str(r['opt_pick']))[:30]}</small>")
-        elif kind and r["opt_est_price"]:
+        elif kind:
             # "~" is load-bearing: this price is derived from the moneyline,
             # not quoted by a bookmaker, and the reader has to be able to tell.
-            opt_cell = (f"<span class='price est'>~{r['opt_est_price']:.2f}</span>"
+            txt, est = _opt_price_text(r)
+            cls = "price est" if est else "price"
+            opt_cell = (f"<span class='{cls}'>{txt}</span>"
                         f"<small>{html.escape(str(r['opt_pick']))[:30]}</small>")
-        elif kind:
-            opt_cell = f"<small class='pending'>{html.escape(str(r['opt_pick']))[:44]}</small>"
         items.append(
             f"<tr class='row'><td class='c-stars'>{'★' * (r['stars'] or 0)}</td>"
             f"<td class='c-ev'><b>{html.escape(event)}</b>"
@@ -367,6 +374,23 @@ def _bankroll_block(stats: dict) -> str:
     ).replace(",", " ")
 
 
+def _opt_price_text(row):
+    """The price the optimal line took, as a string, never "по линии".
+
+    Order matters: a real quoted price first, then the estimate computed from
+    both sides of the market, then -- for rows logged before that estimate
+    existed -- one derived from our own price with an assumed margin. Anything
+    estimated carries a "~" so it can never be mistaken for a price we took.
+    """
+    if row["opt_price"]:
+        return f"{row['opt_price']:.2f}", False
+    est = row["opt_est_price"] if "opt_est_price" in row.keys() else None
+    if not est and row["opt_kind"] == "set_handicap" and row["entry_price"]:
+        est = analytics.set_handicap_price_from_one(row["entry_price"], row["sport_key"]
+                                                    if "sport_key" in row.keys() else "")
+    return (f"~{est:.2f}", True) if est else ("по линии", True)
+
+
 def _mini_signals(rows, strategy: str = "aggressive") -> str:
     """The last few signals in a bucket, shown when the count is clicked.
 
@@ -384,7 +408,7 @@ def _mini_signals(rows, strategy: str = "aggressive") -> str:
         # card showing the aggressive entry is how "коэффициент 3.45 в
         # оптимальной за 3.35" ended up on the page.
         if strategy == "optimal" and r["opt_kind"] and r["opt_kind"] != "straight":
-            entry = f"{r['opt_price']:.2f}" if r["opt_price"] else "по линии"
+            entry = _opt_price_text(r)[0]
             pick = str(r["opt_pick"] or "")
         else:
             entry = f"{r['entry_price']:.2f}" if r["entry_price"] else "—"

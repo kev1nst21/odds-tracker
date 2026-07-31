@@ -269,6 +269,32 @@ def _set_handicap_price(pick_odds: float, other_odds: float, sport_key: str):
     return round(1 / p_at_least_one, 2)
 
 
+# Typical two-way bookmaker margin. Only used by the fallback below, where the
+# opponent's price isn't available and the vig has to be assumed rather than
+# measured. 5% is the usual figure for a mainstream tennis moneyline.
+ASSUMED_TWO_WAY_MARGIN = 0.05
+
+
+def set_handicap_price_from_one(pick_odds: float, sport_key: str = ""):
+    """Estimate '+1.5 sets' from OUR price alone.
+
+    The proper version (_set_handicap_price) normalises both sides to strip the
+    bookmaker's margin exactly. This one exists for rows logged before that
+    calculation shipped, where only our own price was stored -- it assumes a
+    typical margin instead of measuring it. Less precise, still far better than
+    printing "по линии" and leaving the reader to guess.
+    """
+    if not pick_odds or pick_odds <= 1:
+        return None
+    ours = (1.0 / pick_odds) / (1.0 + ASSUMED_TWO_WAY_MARGIN)
+    bo = _best_of(sport_key)
+    s = _match_prob_to_set_prob(ours, bo)
+    if s is None:
+        return None
+    p = 1 - (1 - s) ** (2 if bo == 3 else 3)
+    return round(1 / p, 2) if p > 0.01 else None
+
+
 def _safe_variant(bet: dict, by_book: dict, sport_key: str, trigger: float = None):
     """A lower-risk way to back the same opinion when the straight price is
     high (user decision, 2026-07-29: above 3.5 offer a "безопасный" variant
