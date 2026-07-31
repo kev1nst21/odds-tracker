@@ -25,12 +25,23 @@ permissions:
   pages: write
   id-token: write
 
-# Runs must never pile up: the loop writes to a SQLite file that is restored
-# from and saved to the CI cache, and two writers would corrupt the history.
-# runner.py finishes before the next window on its own, so this is a backstop.
+# QUEUE the next run, never cancel the current one.
+#
+# This was `cancel-in-progress: true` and it quietly broke the whole chain.
+# Each run dispatches its successor in its final step, so the successor starts
+# while the predecessor is still doing its Post steps -- and the Post steps are
+# where the SQLite cache gets SAVED. Cancelling there threw away the poll
+# history every single cycle. Measured 2026-07-31: runs 38, 39, 40, 41 and 42
+# were all marked "cancelled", each killed by its own successor, 25 minutes
+# apart like clockwork.
+#
+# With `false` the successor waits in the queue for a few seconds until the
+# predecessor has finished writing, then starts. Runs still cannot overlap --
+# that is what the group does -- but nothing gets killed mid-write. A hung run
+# is bounded by timeout-minutes below, so the queue cannot grow forever.
 concurrency:
   group: poll-odds
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   poll:
