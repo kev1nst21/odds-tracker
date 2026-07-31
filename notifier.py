@@ -83,6 +83,12 @@ def _format_event(s: dict) -> str:
         lines.append(f"🟢 <b>Оптимальная:</b> {html.escape(opt['pick'])} ≈ {opt['price']:.2f}")
         if opt.get("note"):
             lines.append(f"<i>{html.escape(opt['note'])}</i>")
+    elif opt.get("est_price"):
+        # "~" because this price is derived from the moneyline, not quoted.
+        lines.append(f"🟢 <b>Оптимальная:</b> {html.escape(opt['pick'])}")
+        lines.append(f"<i>Расчётный коэффициент ~{opt['est_price']:.2f} — выведен из "
+                     f"линии на матч, в конторе обычно на 5–10% ниже. Заходимость "
+                     f"считаем, прибыль нет: цену мы не выкупаем.</i>")
     else:
         lines.append(f"🟡 <b>Оптимальная:</b> {html.escape(opt['pick'])}")
         lines.append("<i>Цену смотри в линии. В статистику этот вход не пойдёт — "

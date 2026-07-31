@@ -154,6 +154,11 @@ _MIGRATIONS = {
         # so there is no honest way to settle one. Ungradeable rows are shown
         # on the site but never enter a win rate.
         "opt_gradeable": "INTEGER",
+        # Derived from the match odds rather than quoted anywhere -- see
+        # analytics._set_handicap_price. Kept in its own column so it can never
+        # be mistaken for a price we actually took: the win rate uses it, the
+        # profit maths deliberately does not.
+        "opt_est_price": "REAL",
         # Graded separately from `result` -- a double chance also wins on a draw.
         "opt_result": "TEXT",
     },
@@ -345,10 +350,10 @@ def save_bet_alert(summary: dict, detected_at: str, poll_interval_minutes: int =
                  alert_price, detected_at, resolved,
                  strategy, safe_market, safe_pick, safe_price, safe_book,
                  poll_interval_minutes,
-                 opt_kind, opt_pick, opt_price, opt_book, opt_gradeable)
+                 opt_kind, opt_pick, opt_price, opt_book, opt_gradeable, opt_est_price)
             VALUES (?, 'prematch', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'down', ?, ?, 0,
                     ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?)
             """,
             (
                 "bet",
@@ -383,6 +388,7 @@ def save_bet_alert(summary: dict, detected_at: str, poll_interval_minutes: int =
                 opt.get("price"),
                 opt.get("book"),
                 1 if opt.get("gradeable") else 0,
+                opt.get("est_price"),
             ),
         )
         conn.commit()
@@ -571,7 +577,7 @@ def recent_bets(limit: int = 5, kind: str = "prematch", strategy: str = None):
             "       down_count, books_count, old_price, new_price, "
             "       entry_price, entry_book, start_time, detected_at, "
             "       resolved, result, clv_pct, resolved_at, "
-            "       opt_kind, opt_pick, opt_price, opt_book, opt_gradeable, opt_result "
+            "       opt_kind, opt_pick, opt_price, opt_book, opt_gradeable, opt_result, opt_est_price "
             f"FROM tracked_alerts WHERE kind=?{sf} "
             "ORDER BY detected_at DESC LIMIT ?",
             (kind,) + sp + (limit,),
@@ -595,7 +601,7 @@ def active_signals(limit: int = 40, kind: str = "prematch"):
                    down_count, books_count, old_price, new_price, entry_price,
                    entry_book, start_time, detected_at, strategy,
                    safe_market, safe_pick, safe_price,
-                   opt_kind, opt_pick, opt_price, opt_book, opt_gradeable
+                   opt_kind, opt_pick, opt_price, opt_book, opt_gradeable, opt_est_price
             FROM tracked_alerts
             WHERE kind=? AND resolved=0 AND start_time IS NOT NULL AND start_time > ?
             ORDER BY start_time ASC LIMIT ?
@@ -643,7 +649,7 @@ def export_ledger(limit: int = 5000):
                    old_price, new_price, entry_price, entry_book,
                    strategy, safe_market, safe_pick, safe_price,
                    opt_kind, opt_pick, opt_price, opt_book, opt_gradeable, opt_result,
-                   poll_interval_minutes, resolved, result, clv_pct, resolved_at
+                   opt_est_price, poll_interval_minutes, resolved, result, clv_pct, resolved_at
             FROM tracked_alerts WHERE kind='prematch'
             ORDER BY detected_at ASC LIMIT ?
             """,

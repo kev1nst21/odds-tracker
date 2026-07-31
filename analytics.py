@@ -192,6 +192,83 @@ def _handicap_hint(sport_key: str):
     return _HANDICAP_DEFAULT
 
 
+# --- estimating the price of a +1.5 set handicap ---------------------------
+# We do not buy the handicap market, but for tennis its price can be DERIVED
+# from the match-winner odds we already have, because tennis has a rigid
+# structure: a match is won by taking sets, and sets are close enough to
+# independent for this purpose.
+#
+# Take our player's no-vig match probability M and let s be his chance of
+# winning any one set. In a best-of-3 he wins the match by taking two sets:
+#
+#     M = s^2 + 2*s^2*(1-s) = s^2 * (3 - 2s)
+#
+# and in a best-of-5 by taking three:
+#
+#     M = s^3 * (1 + 3*(1-s) + 6*(1-s)^2)
+#
+# Both are strictly increasing in s, so s is recovered by bisection. Then
+# "+1.5 sets" -- our player takes at least one set -- is simply the complement
+# of being whitewashed:
+#
+#     best-of-3:  P = 1 - (1-s)^2        best-of-5:  P = 1 - (1-s)^3
+#
+# and the fair decimal price is 1/P. Worked example, an underdog at 4.60
+# against 1.20: M = 0.207, s = 0.293, P = 0.50, price = 2.00.
+#
+# This is an ESTIMATE and is labelled as one everywhere it appears. A real
+# bookmaker adds margin, so expect 5-10% less on screen. It never enters the
+# profit maths -- only the win rate, which needs no price.
+_SLAMS = ("wimbledon", "us_open", "french_open", "australian_open", "roland")
+
+
+def _best_of(sport_key: str) -> int:
+    """Men's Grand Slam singles are best-of-5; everything else here is
+    best-of-3. Women play best-of-3 even at the slams, hence the atp check."""
+    key = (sport_key or "").lower()
+    if "atp" in key and any(slam in key for slam in _SLAMS):
+        return 5
+    return 3
+
+
+def _match_prob_to_set_prob(m: float, best_of: int = 3) -> float:
+    """Invert the match-win formula by bisection."""
+    if not (0 < m < 1):
+        return None
+
+    def match_prob(s):
+        if best_of == 5:
+            return s ** 3 * (1 + 3 * (1 - s) + 6 * (1 - s) ** 2)
+        return s ** 2 * (3 - 2 * s)
+
+    lo, hi = 0.0, 1.0
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        if match_prob(mid) < m:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+def _set_handicap_price(pick_odds: float, other_odds: float, sport_key: str):
+    """Fair decimal price for '+1.5 sets' on our pick, or None if the two
+    moneyline prices don't give us a usable probability."""
+    if not pick_odds or not other_odds or pick_odds <= 1 or other_odds <= 1:
+        return None
+    # Strip the bookmaker's margin the simple way: normalise the two implied
+    # probabilities so they sum to one.
+    ours = (1 / pick_odds) / ((1 / pick_odds) + (1 / other_odds))
+    bo = _best_of(sport_key)
+    s = _match_prob_to_set_prob(ours, bo)
+    if s is None:
+        return None
+    p_at_least_one = 1 - (1 - s) ** (2 if bo == 3 else 3)
+    if p_at_least_one <= 0.01:
+        return None
+    return round(1 / p_at_least_one, 2)
+
+
 def _safe_variant(bet: dict, by_book: dict, sport_key: str, trigger: float = None):
     """A lower-risk way to back the same opinion when the straight price is
     high (user decision, 2026-07-29: above 3.5 offer a "безопасный" variant
@@ -265,6 +342,19 @@ def _safe_variant(bet: dict, by_book: dict, sport_key: str, trigger: float = Non
     hint = _handicap_hint(sport_key)
     if hint:
         key = (sport_key or "").lower()
+        # For tennis the price is not a guess -- it follows from the match
+        # odds, see _set_handicap_price above. Median across books so one
+        # stale quote can't move it.
+        est = None
+        if key.startswith("tennis_"):
+            other = "away" if side == "home" else "home"
+            est = _set_handicap_price(
+                _median([m.get(side) for m in by_book.values() if m.get(side)]),
+                _median([m.get(other) for m in by_book.values() if m.get(other)]),
+                sport_key,
+            )
+            if est:
+                hint = f"фора по сетам +1.5 ≈ {est:.2f} (взять хотя бы один сет)"
         # A +1.5 SET handicap is the one handicap we can settle without buying
         # the market: it wins whenever our player takes at least one set, and
         # the score endpoint already reports sets for tennis. So it counts
@@ -279,6 +369,11 @@ def _safe_variant(bet: dict, by_book: dict, sport_key: str, trigger: float = Non
             "legs": [],
             "in_band": None,
             "gradeable": set_handicap,
+            # Derived from the moneyline, NOT quoted by anybody. Shown with a
+            # "~" everywhere and deliberately kept out of the profit maths --
+            # a win rate needs no price, a P&L does, and we don't have a real
+            # one. A bookmaker's own line is usually 5-10% worse than this.
+            "est_price": est,
             "note": (
                 f"Прямой коэффициент {bet['entry_price']:.2f} высокий, а ничьей в этом "
                 f"виде спорта нет, поэтому двойной шанс не собрать. Безопасный вариант — "
@@ -333,6 +428,7 @@ def _optimal_play(bet: dict, safe: dict):
         "kind": safe["market"],
         "pick": safe["pick"],
         "price": safe.get("price"),
+        "est_price": safe.get("est_price"),
         "book": safe.get("book"),
         "gradeable": bool(safe.get("gradeable")),
         "note": safe.get("note"),

@@ -45,7 +45,15 @@ ODDSPAPI_LOOKUP_TTL_HOURS = int(os.getenv("ODDSPAPI_LOOKUP_TTL_HOURS", "6"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-SPIKE_THRESHOLD_PCT = float(os.getenv("SPIKE_THRESHOLD_PCT", "0.10"))
+# Minimum drop that counts as a signal.
+#
+# 2026-07-31: lowered from 0.10 to 0.08 by user decision. Measured over the
+# preceding 23 hours the market produced only 19 drops of 10%+ across 146
+# events, and the entry rules then cut that to a single signal -- too thin to
+# learn anything from. 8% widens the top of the funnel without touching the
+# rules that decide whether an entry is real, which are the ones that actually
+# protect quality.
+SPIKE_THRESHOLD_PCT = float(os.getenv("SPIKE_THRESHOLD_PCT", "0.08"))
 
 # A line drifting by at least this much counts as "this bookmaker moved too"
 # when scoring how broad a move is (see analytics._stars). Deliberately far

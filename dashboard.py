@@ -255,6 +255,11 @@ def _active_signals(rows) -> str:
         elif kind and r["opt_price"]:
             opt_cell = (f"<span class='price'>{r['opt_price']:.2f}</span>"
                         f"<small>{html.escape(str(r['opt_pick']))[:30]}</small>")
+        elif kind and r["opt_est_price"]:
+            # "~" is load-bearing: this price is derived from the moneyline,
+            # not quoted by a bookmaker, and the reader has to be able to tell.
+            opt_cell = (f"<span class='price est'>~{r['opt_est_price']:.2f}</span>"
+                        f"<small>{html.escape(str(r['opt_pick']))[:30]}</small>")
         elif kind:
             opt_cell = f"<small class='pending'>{html.escape(str(r['opt_pick']))[:44]}</small>"
         items.append(
@@ -334,7 +339,7 @@ def _mini_signals(rows, strategy: str = "aggressive") -> str:
         items.append(
             f"<li><span class='ms-ev'><b>{html.escape(event)}</b>"
             f"<small>{html.escape(pick)} · {old_p} → {new_p} · "
-            f"взяли {entry}</small></span>{st}</li>"
+            f"взяли <b>{entry}</b></small></span>{st}</li>"
         )
     return "<ul class='mini'>" + "".join(items) + "</ul>"
 
@@ -682,17 +687,18 @@ tbody tr:hover td,table tr.row:hover td{background:rgba(255,255,255,.022)}
 .tag.opt{background:rgba(61,220,132,.13);color:var(--good)}
 .tag.agg{background:rgba(255,61,129,.13);color:var(--mag)}
 .tag.safe{background:rgba(74,217,255,.13);color:var(--cy)}
-.c-move{white-space:nowrap;font-family:var(--mono);font-size:13.5px}
-.c-move .old{color:var(--ink3);text-decoration:line-through}
+.c-move{white-space:nowrap;font-family:var(--mono);font-size:16px;font-weight:700}
+.c-move .old{color:var(--ink3);text-decoration:line-through;font-size:14px;font-weight:500}
 .c-move .arr{color:var(--ink3);margin:0 5px}
-.c-move .new{color:var(--ink);font-weight:700}
-.c-move .pct{color:var(--mag);font-weight:700;margin-left:8px}
+.c-move .new{color:var(--warn);font-weight:800;font-size:17px}
+.c-move .pct{color:var(--mag);font-weight:800;margin-left:8px;font-size:15px}
 .c-books{font-family:var(--mono);color:var(--ink);font-weight:700}
 .c-books .of{color:var(--ink3);font-weight:400}
-.c-bet .price{display:block;font-family:Unbounded,sans-serif;font-weight:800;font-size:19px;color:var(--lime)}
+.c-bet .price{display:block;font-family:Unbounded,sans-serif;font-weight:900;font-size:24px;color:var(--lime);letter-spacing:-.01em;line-height:1.1}
 .c-bet small{display:block;color:var(--ink3);font-size:11.5px}
 .chip.shut{color:var(--ink3);font-size:12px;font-weight:600}
-.mono{font-family:var(--mono);font-size:13px}
+.c-bet .price.est{color:var(--cy)}
+.mono{font-family:var(--mono);font-size:15px;font-weight:700;color:var(--cy)}
 .hit{color:var(--good);font-weight:600}
 .miss{color:var(--bad);font-weight:600}
 .pending{color:var(--ink3)}
@@ -723,7 +729,8 @@ ul.mini li{display:flex;justify-content:space-between;align-items:center;gap:11p
 ul.mini li:last-child{border-bottom:0;padding-bottom:0}
 .ms-ev{min-width:0}
 .ms-ev b{display:block;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ms-ev small{display:block;color:var(--ink3);font-size:11.5px;font-family:var(--mono)}
+.ms-ev small{display:block;color:var(--ink3);font-size:12.5px;font-family:var(--mono)}
+.ms-ev small b{color:var(--lime);font-size:14px;font-weight:800}
 .stat b{display:block;font-family:Unbounded,sans-serif;font-weight:800;font-size:18px;
   font-variant-numeric:tabular-nums}
 .stat span{display:block;font-size:10px;color:var(--ink3);margin-top:3px}
