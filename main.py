@@ -101,9 +101,17 @@ def run_once():
     # results.py can score them later against the price a real bet would have
     # got. Only alertable ones -- if there's nowhere left to bet, there is no
     # bet to score.
-    logged = sum(1 for s in summaries
-                 if s.get("alertable")
-                 and storage.save_bet_alert(s, fetched_at, POLL_INTERVAL_MINUTES))
+    # save_bet_alert() returns False for a bet we already logged. That flag is
+    # what stops the bot repeating itself: since 2026-07-31 a move is measured
+    # against the price an hour ago, so the same event stays "alertable" for
+    # cycle after cycle. Without this it would be sent to Telegram every few
+    # minutes for an hour.
+    logged = 0
+    for s in summaries:
+        if not s.get("alertable"):
+            continue
+        s["is_new"] = storage.save_bet_alert(s, fetched_at, POLL_INTERVAL_MINUTES)
+        logged += 1 if s["is_new"] else 0
 
     # Every move that cleared the threshold, signal or not. Priced at the
     # pre-drop coefficient, this is the ceiling the strategy is worth when

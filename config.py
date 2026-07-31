@@ -55,6 +55,28 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 # protect quality.
 SPIKE_THRESHOLD_PCT = float(os.getenv("SPIKE_THRESHOLD_PCT", "0.08"))
 
+# How far back a price has to be compared against.
+#
+# 2026-07-31, and this is the single most important number in the project.
+# The detector used to diff each line against the IMMEDIATELY PRECEDING
+# snapshot, which silently tied the sensitivity of the whole tool to the
+# polling cadence: at a 3-minute cadence an alert required an 8% move inside
+# three minutes, which almost never happens. Production proved it -- one cycle
+# saw 113 events, 3,690 quotes and "просело 0": not a single line had moved
+# even 1% since the poll five minutes earlier. Polling FASTER was making the
+# tool blinder, which is the exact opposite of the intention.
+#
+# Now every line is compared against its price this many minutes ago. Cadence
+# becomes what it should always have been -- how EARLY we notice a move, not
+# whether we notice it at all.
+BASELINE_WINDOW_MINUTES = int(os.getenv("BASELINE_WINDOW_MINUTES", "60"))
+
+# Safety rail on the above. If the only price we hold for a line is much older
+# than the window (a league we poll rarely, or one that vanished for a while),
+# comparing against it would report slow multi-day drift as a sudden move.
+# Anything older than window x this is not a baseline, it's history.
+BASELINE_MAX_AGE_MULT = float(os.getenv("BASELINE_MAX_AGE_MULT", "3"))
+
 # A line drifting by at least this much counts as "this bookmaker moved too"
 # when scoring how broad a move is (see analytics._stars). Deliberately far
 # below SPIKE_THRESHOLD_PCT: the point is not whether each book spiked, it's
@@ -108,6 +130,56 @@ SOCCER_LEAGUE_KEYS = [
     "soccer_uefa_champs_league",
     "soccer_uefa_champs_league_qualification",
 ]
+
+# Everything above is the CORE list: it is polled every single cycle.
+# Everything else in season is polled too, just on rotation -- see below.
+#
+# 2026-07-31. Seven top-flight European leagues is the worst possible hunting
+# ground for what this tool looks for. Those markets are the most watched,
+# most liquid and most efficiently priced in the world; a genuinely
+# informed-money move there gets arbitraged away in seconds, and there is
+# nothing dirty to find. Suspicious money shows up where nobody is looking:
+# second and third divisions, reserve and youth sides, small federations,
+# out-of-season friendlies, minor cups. So the tracker now polls the whole
+# soccer group, not a shortlist -- and deliberately gives the obscure end of
+# it priority over the famous end.
+WIDE_COVERAGE = os.getenv("WIDE_COVERAGE", "1") not in ("0", "false", "False")
+
+# Sport groups (as named by GET /v4/sports) that the wide sweep pulls from.
+WIDE_GROUPS = [g.strip() for g in
+               os.getenv("WIDE_GROUPS", "Soccer,Tennis").split(",") if g.strip()]
+
+# Hard budget per cycle. Each sport key costs len(MARKETS) x len(REGIONS)
+# credits, i.e. 1 credit on the current settings, so this is literally "how
+# many credits a cycle may spend on odds".
+#
+# The arithmetic that forces a cap: the plan is 20,000 credits a month, about
+# 666 a day. Measured in production, a cycle costs 1 + (number of sports), and
+# the tracker was running ~102 cycles a day over 8 sports = ~918 credits a
+# day. It was already spending 1.4x its income before any widening. Since
+# breadth is now worth more than frequency (see BASELINE_WINDOW_MINUTES), the
+# cap buys breadth and the cadence pays for it.
+MAX_SPORTS_PER_CYCLE = int(os.getenv("MAX_SPORTS_PER_CYCLE", "10"))
+
+# The wide list is bigger than one cycle's budget, so it is walked in slices:
+# each cycle takes the next MAX_SPORTS_PER_CYCLE - len(core) keys and the
+# offset advances. Every league still gets seen regularly, just not every
+# cycle -- which the baseline window above makes harmless, because a move is
+# measured against the last price we hold for that line, not against "the
+# previous cycle".
+ROTATE_WIDE_COVERAGE = os.getenv("ROTATE_WIDE_COVERAGE", "1") not in ("0", "false", "False")
+
+# Slots reserved for the wide sweep before the core list is allowed to spend
+# the budget. Without a reservation, a busy tennis week fills every slot with
+# famous tournaments and the tracker silently reverts to watching only the
+# efficient markets -- the exact failure the wide sweep exists to fix.
+WIDE_MIN_SLOTS = int(os.getenv("WIDE_MIN_SLOTS", "5"))
+
+# GET /v4/sports/ is documented as free but is NOT -- production logs show it
+# billing 1 credit per call ("used=1454 remaining=18546 (call: /v4/sports/)").
+# At 100+ cycles a day that is a whole league's worth of budget spent on a
+# list that changes maybe twice a day, so it gets cached.
+SPORTS_LIST_TTL_MINUTES = int(os.getenv("SPORTS_LIST_TTL_MINUTES", "180"))
 
 # Tennis has no single stable "ATP tour" key -- confirmed live (2026-07-29)
 # that /v4/sports only lists whichever tournament is currently in season

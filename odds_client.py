@@ -29,6 +29,12 @@ from config import (
     TENNIS_GROUP,
     PREMATCH_ONLY,
     PREMATCH_BUFFER_MINUTES,
+    WIDE_COVERAGE,
+    WIDE_GROUPS,
+    MAX_SPORTS_PER_CYCLE,
+    ROTATE_WIDE_COVERAGE,
+    WIDE_MIN_SLOTS,
+    SPORTS_LIST_TTL_MINUTES,
 )
 
 
@@ -64,25 +70,110 @@ def _get(path: str, params: dict):
 
 
 def list_sports() -> list:
-    """Free call -- every sport currently in season, each with
-    'key', 'group', 'title', 'active'."""
-    return _get("/v4/sports/", {})
+    """Every sport currently in season, each with 'key', 'group', 'title',
+    'active'.
+
+    The docs call this endpoint free. It is not: production logs show it
+    billing a credit per call ("used=1454 remaining=18546 (call: /v4/sports/)").
+    At 100+ cycles a day that is an entire league's worth of budget spent on a
+    list that changes about twice a day, so the answer is cached in the meta
+    table for SPORTS_LIST_TTL_MINUTES and refetched only when it goes stale.
+    """
+    import json
+    import storage  # local import: storage imports config, not this module
+
+    try:
+        stamp = storage.get_meta("sports_list_at")
+        cached = storage.get_meta("sports_list")
+        if stamp and cached:
+            age = datetime.now(timezone.utc) - datetime.fromisoformat(stamp)
+            if age < timedelta(minutes=SPORTS_LIST_TTL_MINUTES):
+                data = json.loads(cached)
+                if data:
+                    return data
+    except Exception:  # noqa: BLE001 -- a cache miss must never break the run
+        pass
+
+    data = _get("/v4/sports/", {})
+    try:
+        storage.set_meta("sports_list", json.dumps(data))
+        storage.set_meta("sports_list_at", datetime.now(timezone.utc).isoformat())
+    except Exception:  # noqa: BLE001
+        pass
+    return data
+
+
+def _obscurity_rank(key: str) -> tuple:
+    """Sort key that puts the quiet corners of the market FIRST.
+
+    The whole premise of the tracker is catching money that knows something.
+    In the Premier League that money is competing with every trading desk on
+    earth and the price is right again within seconds. In a Latvian second
+    division or a reserve-team cup tie, one informed bet can move a line and
+    leave it moved for an hour, and the genuinely dirty games live there
+    too -- nobody fixes a Champions League match. So famous leagues are polled
+    because they are cheap to include, not because they are where the edge is,
+    and they go last in the rotation.
+    """
+    k = key.lower()
+    famous = ("_epl", "la_liga", "serie_a", "bundesliga", "ligue_one",
+              "champs_league", "uefa_europa", "usa_mls", "_atp_", "_wta_")
+    quiet = ("_2", "_3", "_reserve", "_youth", "u19", "u20", "u21", "_amateur",
+             "_women", "_cup", "friendl", "_challenger", "_itf", "_qualif")
+    return (0 if any(q in k for q in quiet) else (2 if any(f in k for f in famous) else 1), k)
 
 
 def select_sport_keys(all_sports: list = None) -> list:
-    """Dynamic sport-key selection: the fixed soccer leagues (only if they're
-    currently listed -- a league can briefly vanish between seasons) plus
-    every currently in-season tennis tournament (group == TENNIS_GROUP), so
-    tennis coverage doesn't go stale the moment one tournament ends."""
+    """Which sport keys this cycle actually pays for.
+
+    The core soccer leagues and every in-season tennis tournament are always
+    included. On top of that, WIDE_COVERAGE sweeps the rest of the configured
+    groups -- the lower divisions, cups and small federations where a line
+    move is still worth something (see _obscurity_rank).
+
+    That list is far bigger than one cycle's credit budget, so it is walked in
+    slices of MAX_SPORTS_PER_CYCLE with the cursor kept in the database. This
+    is only safe because the detector compares against a price from an hour
+    ago rather than against the previous cycle, so a league being polled every
+    fourth cycle still gets its moves measured correctly.
+    """
     if all_sports is None:
         all_sports = list_sports()
-    live_keys = {s["key"] for s in all_sports if s.get("active", True)}
-    selected = [k for k in SOCCER_LEAGUE_KEYS if k in live_keys]
-    selected += sorted(
-        s["key"] for s in all_sports
-        if s.get("group") == TENNIS_GROUP and s.get("key") in live_keys
-    )
-    return selected
+    live = [s for s in all_sports if s.get("active", True)]
+    live_keys = {s["key"] for s in live}
+
+    # Tennis first: in-season tournaments are few, they rotate constantly, and
+    # a tennis line that moves is the single most gradeable thing we track.
+    core = sorted(s["key"] for s in live if s.get("group") == TENNIS_GROUP)
+    core += [k for k in SOCCER_LEAGUE_KEYS if k in live_keys]
+    core = list(dict.fromkeys(core))
+
+    if not WIDE_COVERAGE:
+        return core[:MAX_SPORTS_PER_CYCLE] if MAX_SPORTS_PER_CYCLE else core
+
+    wide = sorted((s["key"] for s in live
+                   if s.get("group") in WIDE_GROUPS and s["key"] not in core),
+                  key=_obscurity_rank)
+    if not wide:
+        return core[:MAX_SPORTS_PER_CYCLE]
+
+    # The wide sweep gets its slots reserved BEFORE the core list is trimmed.
+    # Otherwise a busy tennis week fills the whole budget with famous names and
+    # the tracker quietly goes back to watching only the efficient markets --
+    # which is the exact failure this was written to fix.
+    wide_slots = min(WIDE_MIN_SLOTS, len(wide), MAX_SPORTS_PER_CYCLE)
+    kept_core = core[:max(0, MAX_SPORTS_PER_CYCLE - wide_slots)]
+    wide_slots = max(wide_slots, MAX_SPORTS_PER_CYCLE - len(kept_core))
+    wide_slots = min(wide_slots, len(wide))
+
+    if not ROTATE_WIDE_COVERAGE:
+        return kept_core + wide[:wide_slots]
+
+    # Imported here rather than at module scope: storage imports config, and a
+    # top-level import would make the two modules circular at startup.
+    import storage
+    start = storage.next_rotation_offset(wide_slots, len(wide))
+    return kept_core + [wide[(start + i) % len(wide)] for i in range(wide_slots)]
 
 
 def fetch_odds_for_sport(sport_key: str, on_error=None) -> list:

@@ -19,6 +19,8 @@ from config import (
     SPIKE_THRESHOLD_PCT,
     MIN_DRIFT_PCT,
     ASIAN_SHARP_BOOKMAKERS,
+    BASELINE_WINDOW_MINUTES,
+    BASELINE_MAX_AGE_MULT,
     CASCADE_WINDOW_MINUTES,
     EXCHANGE_BOOKMAKERS,
     MAX_SIGNAL_PRICE,
@@ -39,9 +41,18 @@ def _window_start_iso(fetched_at: str, minutes: int) -> str:
 def detect(records, fetched_at):
     """records: output of odds_client.flatten_odds().
     Returns (spikes, movements). Spikes are sorted so cascades and sharp-book
-    moves surface first."""
+    moves surface first.
+
+    Every price is diffed against where that same line stood
+    BASELINE_WINDOW_MINUTES ago, not against the previous poll. See the long
+    note on BASELINE_WINDOW_MINUTES in config.py for why -- in short, diffing
+    against the previous poll meant a faster cadence made the tool blinder.
+    """
     spikes = []
     movements = []
+    baseline_iso = _window_start_iso(fetched_at, BASELINE_WINDOW_MINUTES)
+    floor_iso = _window_start_iso(
+        fetched_at, int(BASELINE_WINDOW_MINUTES * BASELINE_MAX_AGE_MULT))
 
     for r in records:
         # Exchanges and long-shot prices are excluded from signal generation
@@ -61,8 +72,9 @@ def detect(records, fetched_at):
         if EXCLUDE_DRAW and r["outcome_id"] == "draw":
             continue
 
-        prev = storage.get_latest_price(
-            r["fixture_id"], r["bookmaker"], r["market_id"], r["outcome_id"], r["player_key"]
+        prev = storage.get_baseline_price(
+            r["fixture_id"], r["bookmaker"], r["market_id"], r["outcome_id"],
+            r["player_key"], baseline_iso, floor_iso,
         )
         if prev is None:
             continue  # first sighting of this line -- nothing to diff against

@@ -141,7 +141,13 @@ def send_telegram_message(text: str):
 def notify_summaries(summaries: list, max_events: int = 6, dashboard_url: str = None):
     """One digest per cycle, containing only actionable events: the drop
     cleared the threshold and there is still a bookmaker to take it at."""
-    actionable = [s for s in summaries if s.get("alertable")]
+    # "is_new" is set by main.py from the database insert. Absent (older
+    # callers, tests) it defaults to True, so nothing can go silent by
+    # accident -- the guard only ever suppresses a repeat we can prove is one.
+    # It matters now because a move is measured against the price an hour ago,
+    # so the same event stays actionable for many cycles in a row.
+    actionable = [s for s in summaries
+                  if s.get("alertable") and s.get("is_new", True)]
     if not actionable:
         return
 
