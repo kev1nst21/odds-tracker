@@ -243,27 +243,34 @@ def _active_signals(rows) -> str:
         entry = f"{r['entry_price']:.2f}" if r["entry_price"] else "—"
         old_p = f"{r['old_price']:.2f}" if r["old_price"] else "—"
         new_p = f"{r['new_price']:.2f}" if r["new_price"] else "—"
-        tag = ("<span class='tag opt'>ОПТИМАЛЬНАЯ</span>"
-               if r["strategy"] == "optimal" else "<span class='tag agg'>АГРЕССИВНАЯ</span>")
-        safe = ""
-        if r["safe_pick"]:
-            price = f" {r['safe_price']:.2f}" if r["safe_price"] else ""
-            safe = f"<span class='tag safe'>🛡{html.escape(str(r['safe_pick']))[:34]}{price}</span>"
+        # The two strategies place DIFFERENT bets here, so the row shows both.
+        # Printing one price under an "ОПТИМАЛЬНАЯ" label was actively
+        # misleading: a 3.45 pick that the optimal line actually enters as a
+        # 1.68 double chance read as if we were recommending 3.35 twice.
+        opt_cell = "<span class='chip shut'>— не входим</span>"
+        kind = r["opt_kind"]
+        if kind == "straight":
+            opt_cell = (f"<span class='price'>{entry}</span>"
+                        f"<small>та же ставка</small>")
+        elif kind and r["opt_price"]:
+            opt_cell = (f"<span class='price'>{r['opt_price']:.2f}</span>"
+                        f"<small>{html.escape(str(r['opt_pick']))[:30]}</small>")
+        elif kind:
+            opt_cell = f"<small class='pending'>{html.escape(str(r['opt_pick']))[:44]}</small>"
         items.append(
             f"<tr class='row'><td class='c-stars'>{'★' * (r['stars'] or 0)}</td>"
             f"<td class='c-ev'><b>{html.escape(event)}</b>"
             f"<small>старт {_fmt_start(r['start_time'])} UTC</small></td>"
-            f"<td class='c-out'>{html.escape(r['outcome_name'] or '')}"
-            f"<div class='tags'>{tag}{safe}</div></td>"
+            f"<td class='c-out'>{html.escape(r['outcome_name'] or '')}</td>"
             f"<td class='c-move'><span class='old'>{old_p}</span><span class='arr'>→</span>"
             f"<span class='new'>{new_p}</span></td>"
-            f"<td class='c-books'>{r['down_count'] or 0}<span class='of'>/{r['books_count'] or 0}</span></td>"
             f"<td class='c-bet'><span class='price'>{entry}</span>"
-            f"<small>{html.escape(r['entry_book'] or '')}</small></td></tr>"
+            f"<small>{html.escape(r['entry_book'] or '')}</small></td>"
+            f"<td class='c-bet'>{opt_cell}</td></tr>"
         )
     return ("<div class='feed-wrap'><table class='feed'>"
-            "<tr><th></th><th>Событие</th><th>Ставим на</th><th>Был → стал</th>"
-            "<th>Контор</th><th>Взяли по</th></tr>" + "".join(items) + "</table></div>")
+            "<tr><th></th><th>Событие</th><th>Деньги на</th><th>Был → стал</th>"
+            "<th>Агрессивная</th><th>Оптимальная</th></tr>" + "".join(items) + "</table></div>")
 
 
 def _bankroll_block(stats: dict) -> str:
@@ -294,7 +301,7 @@ def _bankroll_block(stats: dict) -> str:
     ).replace(",", " ")
 
 
-def _mini_signals(rows) -> str:
+def _mini_signals(rows, strategy: str = "aggressive") -> str:
     """The last few signals in a bucket, shown when the count is clicked.
 
     A total on its own is not checkable. Being able to open it and see the
@@ -307,7 +314,15 @@ def _mini_signals(rows) -> str:
     for r in rows:
         home, away = r["home_team"], r["away_team"]
         event = f"{home} — {away}" if home and away else str(r["fixture_id"])
-        entry = f"{r['entry_price']:.2f}" if r["entry_price"] else "—"
+        # Each card must quote the price ITS OWN strategy took. The optimal
+        # card showing the aggressive entry is how "коэффициент 3.45 в
+        # оптимальной за 3.35" ended up on the page.
+        if strategy == "optimal" and r["opt_kind"] and r["opt_kind"] != "straight":
+            entry = f"{r['opt_price']:.2f}" if r["opt_price"] else "по линии"
+            pick = str(r["opt_pick"] or "")
+        else:
+            entry = f"{r['entry_price']:.2f}" if r["entry_price"] else "—"
+            pick = r["outcome_name"] or ""
         old_p = f"{r['old_price']:.2f}" if r["old_price"] else "—"
         new_p = f"{r['new_price']:.2f}" if r["new_price"] else "—"
         if r["resolved"]:
@@ -318,8 +333,8 @@ def _mini_signals(rows) -> str:
             st = "<span class='pending'>⏳ ждём</span>"
         items.append(
             f"<li><span class='ms-ev'><b>{html.escape(event)}</b>"
-            f"<small>{html.escape(r['outcome_name'] or '')} · {old_p} → {new_p} · "
-            f"взяли {entry} у {html.escape(r['entry_book'] or '—')}</small></span>{st}</li>"
+            f"<small>{html.escape(pick)} · {old_p} → {new_p} · "
+            f"взяли {entry}</small></span>{st}</li>"
         )
     return "<ul class='mini'>" + "".join(items) + "</ul>"
 
@@ -365,7 +380,7 @@ def _strategy_card(stats: dict, title: str, subtitle: str, cls: str, recent=None
       {_unverifiable_note(stats)}
       <div class="sig-list" id="sig-{cls}" hidden>
         <div class="sig-cap">Последние сигналы этой стратегии</div>
-        {_mini_signals(recent)}
+        {_mini_signals(recent, stats.get('strategy'))}
       </div>
       {_bankroll_block(stats)}
     </div>

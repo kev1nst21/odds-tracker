@@ -570,7 +570,8 @@ def recent_bets(limit: int = 5, kind: str = "prematch", strategy: str = None):
             "SELECT fixture_id, home_team, away_team, outcome_name, stars, "
             "       down_count, books_count, old_price, new_price, "
             "       entry_price, entry_book, start_time, detected_at, "
-            "       resolved, result, clv_pct, resolved_at "
+            "       resolved, result, clv_pct, resolved_at, "
+            "       opt_kind, opt_pick, opt_price, opt_book, opt_gradeable, opt_result "
             f"FROM tracked_alerts WHERE kind=?{sf} "
             "ORDER BY detected_at DESC LIMIT ?",
             (kind,) + sp + (limit,),
