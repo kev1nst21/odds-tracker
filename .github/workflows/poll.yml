@@ -95,9 +95,9 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           # Keep in sync with config.py's default -- an env var here silently
-          # overrides it, and a stale 0.08 left the dashboard telling users
-          # "от 8%" while the code was meant to alert from 10%.
-          SPIKE_THRESHOLD_PCT: "0.10"
+          # overrides it, and a stale value once left the dashboard telling
+          # users one threshold while the code alerted on another.
+          SPIKE_THRESHOLD_PCT: "0.08"
           RESULTS_CHECK_INTERVAL_HOURS: "3"
           # Deliberately NOT setting POLL_INTERVAL_MINUTES: setting it here
           # would override cadence.json and reintroduce exactly the drift
