@@ -166,8 +166,13 @@ def _stars(down_books: set, sharp_moved: bool) -> int:
 # than invent a number. The user's own instruction for tennis was exactly this:
 # "безопасный вариант это фора по геймам... это уже задача аналитика".
 _HANDICAP_HINTS = (
-    ("tennis_", "фора по геймам (обычно −3.5 / +3.5) либо тотал геймов"),
-    ("table_tennis", "фора по очкам"),
+    # Tennis is fixed to the SET handicap by user decision (2026-07-30):
+    # "по теннису ставим фору по сетам всегда если большие кофы". Unlike a
+    # games handicap this one is also settleable from the score The Odds API
+    # already returns for tennis -- sets won -- so these entries can be counted
+    # in the win rate instead of sitting outside the statistics forever.
+    ("tennis_", "фора по сетам +1.5 (наш игрок берёт хотя бы один сет)"),
+    ("table_tennis", "фора по сетам +1.5 (взять хотя бы одну партию)"),
     ("esports_", "фора по картам (−1.5 / +1.5)"),
     ("basketball_", "фора по очкам либо фора на четверть"),
     ("icehockey_", "фора по шайбам (−1.5 / +1.5)"),
@@ -259,16 +264,21 @@ def _safe_variant(bet: dict, by_book: dict, sport_key: str, trigger: float = Non
 
     hint = _handicap_hint(sport_key)
     if hint:
+        key = (sport_key or "").lower()
+        # A +1.5 SET handicap is the one handicap we can settle without buying
+        # the market: it wins whenever our player takes at least one set, and
+        # the score endpoint already reports sets for tennis. So it counts
+        # towards the win rate -- but not towards profit, because we still do
+        # not know the price, and inventing one would be worse than a gap.
+        set_handicap = key.startswith("tennis_") or key.startswith("table_tennis")
         return {
-            "market": "handicap",
+            "market": "set_handicap" if set_handicap else "handicap",
             "pick": f"{name} — {hint}",
             "price": None,
             "book": None,
             "legs": [],
             "in_band": None,
-            # No price and no line means no way to settle it afterwards, so it
-            # is shown as a recommendation and kept out of every statistic.
-            "gradeable": False,
+            "gradeable": set_handicap,
             "note": (
                 f"Прямой коэффициент {bet['entry_price']:.2f} высокий, а ничьей в этом "
                 f"виде спорта нет, поэтому двойной шанс не собрать. Безопасный вариант — "

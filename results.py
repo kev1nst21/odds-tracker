@@ -150,13 +150,14 @@ def check_pending_results(now: datetime = None) -> int:
 
         clv_pct, clv_continued = _compute_clv(row)
         storage.mark_resolved(row["id"], result, now.isoformat(), clv_pct, clv_continued,
-                              _optimal_result(row, winner, side, result))
+                              _optimal_result(row, winner, side, result,
+                                              (home_score, away_score)))
         resolved_count += 1
 
     return resolved_count
 
 
-def _optimal_result(row, winner, side, straight_result):
+def _optimal_result(row, winner, side, straight_result, scores=None):
     """Settle the bet the ОПТИМАЛЬНАЯ strategy placed, which since 2026-07-30
     is not always the same bet as the aggressive one.
 
@@ -179,4 +180,27 @@ def _optimal_result(row, winner, side, straight_result):
         if winner is None or side not in _VALID_SIDES:
             return "n/a"
         return "hit" if winner in (side, "draw") else "miss"
+    if kind == "set_handicap":
+        return _grade_set_handicap(scores, side)
     return None
+
+
+def _grade_set_handicap(scores, side):
+    """+1.5 sets: our player wins the bet by taking at least one set.
+
+    Deliberately paranoid about what the numbers mean. The Odds API reports
+    tennis as sets won, but nothing in the response says so, and if a provider
+    ever returned games instead ("6-4") this would silently grade nonsense. So
+    the score is only trusted when it actually looks like a set score -- small
+    integers, no more than five between the two players. Anything else is
+    recorded as 'n/a' rather than guessed at.
+    """
+    if not scores:
+        return "n/a"
+    home_score, away_score = scores
+    if home_score is None or away_score is None:
+        return "n/a"
+    if not (0 <= home_score <= 5 and 0 <= away_score <= 5 and home_score + away_score <= 5):
+        return "n/a"  # these are not sets -- refuse to guess
+    ours = home_score if side == "home" else away_score
+    return "hit" if ours >= 1 else "miss"
