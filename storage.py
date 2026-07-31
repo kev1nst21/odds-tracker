@@ -102,6 +102,17 @@ CREATE INDEX IF NOT EXISTS idx_tracked_alerts_lookup
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tracked_alerts_dedup
     ON tracked_alerts (kind, fixture_id, outcome_id);
 
+-- One row per poll: how many events the market moved, and where each one
+-- stopped being a signal. Without this the header can only say "22 движения"
+-- and "1 сигнал", which reads as a bug rather than as a filter doing its job.
+CREATE TABLE IF NOT EXISTS funnel_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    big_drop INTEGER, thin_market INTEGER, all_books_moved INTEGER,
+    entry_too_low INTEGER, signals INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_funnel_at ON funnel_log (at);
+
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -182,6 +193,40 @@ def init_db():
         conn.commit()
 
 
+def save_funnel(counts: dict, at: str):
+    """Persist one cycle's rejection breakdown."""
+    if not counts:
+        return
+    with _conn() as conn:
+        conn.execute(
+            "INSERT INTO funnel_log (at, big_drop, thin_market, all_books_moved,"
+            " entry_too_low, signals) VALUES (?,?,?,?,?,?)",
+            (at, counts.get("big_drop", 0), counts.get("thin_market", 0),
+             counts.get("all_books_moved", 0), counts.get("entry_too_low", 0),
+             counts.get("signals", 0)),
+        )
+        conn.commit()
+
+
+def funnel_stats(hours: int = 24):
+    """Where the last day's market moves stopped being signals.
+
+    This is the answer to "у нас 22 движения, где они?" -- every one of them
+    is in exactly one of these buckets, and the buckets sum to the total.
+    """
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(big_drop),0) AS big_drop,"
+            " COALESCE(SUM(thin_market),0) AS thin_market,"
+            " COALESCE(SUM(all_books_moved),0) AS all_books_moved,"
+            " COALESCE(SUM(entry_too_low),0) AS entry_too_low,"
+            " COALESCE(SUM(signals),0) AS signals"
+            " FROM funnel_log WHERE at>=?", (since,),
+        ).fetchone()
+        return dict(row) if row else {}
+
+
 def prune_snapshots(hours: int = None) -> int:
     """Drop raw price history older than the retention window.
 
@@ -199,6 +244,7 @@ def prune_snapshots(hours: int = None) -> int:
             "DELETE FROM odds_snapshots WHERE fetched_at < ?", (cutoff,)
         ).rowcount
         conn.execute("DELETE FROM spike_events WHERE detected_at < ?", (cutoff,))
+        conn.execute("DELETE FROM funnel_log WHERE at < ?", (cutoff,))
         conn.commit()
         return deleted or 0
 

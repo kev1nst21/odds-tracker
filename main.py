@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from config import (
     DASHBOARD_URL,
+    SPIKE_THRESHOLD_PCT,
     ODDSPAPI_KEY,
     ODDSPAPI_LOOKUP_TTL_HOURS,
     POLL_INTERVAL_MINUTES,
@@ -121,8 +122,9 @@ def run_once():
     # pipeline, and the only way to tune a filter honestly is to see how many
     # events each one is actually eating.
     f = analytics.LAST_FUNNEL
+    storage.save_funnel(f, fetched_at)
     print(f"[funnel] событий {f.get('events',0)} → просело {f.get('with_drop',0)} → "
-          f"от 10% {f.get('big_drop',0)} → отсев: рынок мал {f.get('thin_market',0)}, "
+          f"от {SPIKE_THRESHOLD_PCT*100:.0f}% {f.get('big_drop',0)} → отсев: рынок мал {f.get('thin_market',0)}, "
           f"просело у всех {f.get('all_books_moved',0)}, вход не дотянул "
           f"{f.get('entry_too_low',0)} → сигналов {f.get('signals',0)}")
 
@@ -136,7 +138,7 @@ def run_once():
         f"[{fetched_at}] every {POLL_INTERVAL_MINUTES} min · "
         f"{len(sport_keys)} sports via TheOddsAPI + "
         f"{len(esports_records)} esports/table-tennis lines via OddsPapi, "
-        f"{len(records)} lines total, {len(summaries)} events moved 10%+, "
+        f"{len(records)} lines total, {len(summaries)} events moved {SPIKE_THRESHOLD_PCT*100:.0f}%+, "
         f"{actionable} with an open entry ({optimal} optimal), {starred} at 3 stars, "
         f"{logged} new bets logged, {newly_resolved} resolved, "
         f"{pruned} old rows pruned, dashboard -> {path}"

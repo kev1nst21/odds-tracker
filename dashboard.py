@@ -137,6 +137,35 @@ def _left_words(seconds: float) -> str:
     return f"через {days} {_plural(days, 'день', 'дня', 'дней')} {hours} ч"
 
 
+def _funnel_block(f: dict, span: str) -> str:
+    """Where the day's market moves went.
+
+    A header that says "22 движения" next to "1 сигнал" looks broken. It is
+    not -- the other 21 were each rejected by a specific rule, and every one
+    of them is in exactly one bucket below. Showing the breakdown turns a
+    number that invites suspicion into a number that explains itself, and it
+    is also how we decide which filter to loosen when we want more volume.
+    """
+    total = (f or {}).get("big_drop") or 0
+    if not total:
+        return ""
+    parts = [
+        ("рынок меньше 4 контор", f.get("thin_market") or 0),
+        ("просело уже у всех — брать негде", f.get("all_books_moved") or 0),
+        ("вход вернул меньше половины падения", f.get("entry_too_low") or 0),
+    ]
+    rows = "".join(
+        f"<li><span>{label}</span><b>{n}</b></li>" for label, n in parts if n
+    )
+    return (
+        f"<div class='funnel'><div class='fn-head'>Куда делись движения за {span}</div>"
+        f"<ul><li class='fn-top'><span>Поймали движений от порога</span><b>{total}</b></li>"
+        f"{rows}"
+        f"<li class='fn-ok'><span>Дошло до сигнала</span><b>{f.get('signals') or 0}</b></li>"
+        f"</ul></div>"
+    )
+
+
 def _event_row(s: dict) -> str:
     """One compact row per event. Everything needed to act on it -- which side
     money went into, what the price was and is, how broad the move was, and
@@ -612,10 +641,6 @@ body::after{
 .pill.stale{color:var(--warn);border-color:rgba(255,197,49,.35);background:rgba(255,197,49,.07)}
 .pill .dot{width:7px;height:7px;border-radius:50%;background:currentColor;animation:beat 1.9s infinite}
 @keyframes beat{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.7)}}
-#snd{cursor:pointer;background:none;font:inherit;font-size:12px;font-weight:700;color:var(--ink2);
-  border:1px solid var(--line2);border-radius:999px;padding:6px 11px}
-#snd:hover{color:var(--lime);border-color:rgba(200,255,46,.4)}
-#snd.on{color:var(--lime);border-color:rgba(200,255,46,.5);background:rgba(200,255,46,.08)}
 
 /* ---------------------------------------------------------------- ticker */
 .ticker{overflow:hidden;border-bottom:1px solid var(--line);background:rgba(18,18,24,.55);
@@ -672,6 +697,15 @@ body::after{
 .kpi span{display:block;font-size:11.5px;color:var(--ink3);margin-top:5px;line-height:1.35}
 .kpi.lime b{color:var(--lime)} .kpi.mag b{color:var(--mag)} .kpi.cy b{color:var(--cy)}
 .kpi-note{font-size:12.5px;color:var(--ink3);margin:6px 0 0}
+.funnel{margin:14px 0 0;background:var(--card);border:1px solid var(--line);border-radius:15px;padding:15px 17px}
+.fn-head{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink3);font-weight:700;margin-bottom:10px}
+.funnel ul{list-style:none;margin:0;padding:0;display:grid;gap:7px}
+.funnel li{display:flex;justify-content:space-between;align-items:baseline;gap:14px;font-size:13.5px;color:var(--ink2)}
+.funnel li b{font-family:var(--mono);font-size:16px;font-weight:800;color:var(--ink)}
+.funnel li.fn-top{border-bottom:1px solid var(--line);padding-bottom:8px}
+.funnel li.fn-top b{color:var(--mag)}
+.funnel li.fn-ok{border-top:1px solid var(--line);padding-top:8px}
+.funnel li.fn-ok b{color:var(--lime);font-size:19px}
 
 /* ----------------------------------------------------------------- bento */
 h2{font-family:Unbounded,sans-serif;font-weight:800;font-size:clamp(22px,3vw,30px);
@@ -847,7 +881,6 @@ footer a{color:var(--ink2)}
     <a class="link" href="#proof">Проверка</a>
     <a class="link" href="#how">Как это работает</a>
     <span class="pill $freshness_class"><span class="dot"></span>$freshness_label</span>
-    <button id="snd" type="button" aria-pressed="false" title="Короткая заставка со звуком">♪ звук</button>
   </div>
 </nav>
 $ticker
@@ -902,6 +935,7 @@ $ticker
   </section>
   <p class="kpi-note">Всё посчитано по тому, что реально легло в базу за $span_label — без оценок
   и множителей. Прямо сейчас открытых входов: <b>$hero_open</b>, из них на три звезды: <b>$hero_stars</b>.</p>
+  $funnel_block
 
   <h2 id="feed"><span class="hash">#</span>Сигналы</h2>
   <p class="lead">Что шевельнулось в <b>последнем срезе</b> рынка — окно шириной
@@ -1144,100 +1178,10 @@ SCRIPTS = Template(r"""<script>
   }
   if (cds.length) { ticks(); setInterval(ticks, 1000); }
 
-  /* -------------------------------------------------------------- sound */
-  /* Browsers will not let any page make unmuted sound without a gesture --
-     that is policy, not a bug, and trying to fight it is exactly the kind of
-     thing that makes a site feel like malware. So: the sting is armed on the
-     first tap anywhere, and there is an always-visible toggle to disarm it.
-     Everything is synthesised in the browser -- oscillators for the sting,
-     speechSynthesis for the line -- so the page ships no audio files at all. */
-  var btn = document.getElementById('snd'), armed = true, played = false;
+  /* The audio intro that used to live here was removed on request. Nothing
+     on this page makes noise now, and nothing should: a betting site that
+     starts talking at you reads as spam, however good the joke was. */
 
-  function sting() {
-    if (played) return;
-    played = true;
-    try {
-      var AC = window.AudioContext || window.webkitAudioContext;
-      if (!AC) return;
-      var ctx = new AC();
-      if (ctx.state === 'suspended') ctx.resume();
-      var t = ctx.currentTime + 0.02;
-
-      /* sub drop */
-      var o = ctx.createOscillator(), g = ctx.createGain();
-      o.type = 'sine'; o.frequency.setValueAtTime(150, t);
-      o.frequency.exponentialRampToValueAtTime(38, t + 1.1);
-      g.gain.setValueAtTime(0.0001, t);
-      g.gain.exponentialRampToValueAtTime(0.5, t + 0.05);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + 1.5);
-      o.connect(g).connect(ctx.destination); o.start(t); o.stop(t + 1.6);
-
-      /* two detuned stabs */
-      [0, 0.001].forEach(function (d, i) {
-        var s = ctx.createOscillator(), sg = ctx.createGain(),
-            f = ctx.createBiquadFilter();
-        s.type = 'sawtooth';
-        s.frequency.setValueAtTime(110 * (1 + d) * (i ? 1.5 : 1), t + 0.06);
-        f.type = 'lowpass';
-        f.frequency.setValueAtTime(400, t + 0.06);
-        f.frequency.exponentialRampToValueAtTime(2600, t + 0.5);
-        sg.gain.setValueAtTime(0.0001, t + 0.06);
-        sg.gain.exponentialRampToValueAtTime(0.11, t + 0.14);
-        sg.gain.exponentialRampToValueAtTime(0.0001, t + 1.0);
-        s.connect(f).connect(sg).connect(ctx.destination);
-        s.start(t + 0.06); s.stop(t + 1.1);
-      });
-
-      /* noise riser */
-      var len = Math.floor(ctx.sampleRate * 0.9),
-          buf = ctx.createBuffer(1, len, ctx.sampleRate), ch = buf.getChannelData(0);
-      for (var i = 0; i < len; i++) ch[i] = (Math.random() * 2 - 1) * (i / len);
-      var n = ctx.createBufferSource(), ng = ctx.createGain(), nf = ctx.createBiquadFilter();
-      n.buffer = buf; nf.type = 'highpass'; nf.frequency.value = 1400;
-      ng.gain.setValueAtTime(0.0001, t);
-      ng.gain.exponentialRampToValueAtTime(0.06, t + 0.8);
-      ng.gain.exponentialRampToValueAtTime(0.0001, t + 1.05);
-      n.connect(nf).connect(ng).connect(ctx.destination); n.start(t);
-    } catch (e) { /* no audio available -- the page works fine silent */ }
-
-    /* The spoken line is a bonus layered on top: voice lists load
-       asynchronously and on some platforms never populate at all, so nothing
-       depends on it existing. */
-    try {
-      if (!('speechSynthesis' in window)) return;
-      var say = function () {
-        var u = new SpeechSynthesisUtterance("Bookmaker. I am coming for you. Give me my money back.");
-        u.lang = 'en-US'; u.rate = 0.86; u.pitch = 0.55; u.volume = 0.95;
-        var v = speechSynthesis.getVoices().filter(function (x) {
-          return (x.lang || '').toLowerCase().indexOf('en') === 0;
-        });
-        if (v.length) u.voice = v[0];
-        speechSynthesis.speak(u);
-      };
-      setTimeout(function () {
-        if (speechSynthesis.getVoices().length) { say(); }
-        else { speechSynthesis.addEventListener('voiceschanged', say, { once: true }); }
-      }, 700);
-    } catch (e) { /* ignore */ }
-  }
-
-  function firstGesture() { if (armed) sting(); }
-  document.addEventListener('pointerdown', firstGesture, { once: true });
-  document.addEventListener('keydown', firstGesture, { once: true });
-
-  if (btn) {
-    btn.classList.add('on');
-    btn.setAttribute('aria-pressed', 'true');
-    btn.addEventListener('click', function (e) {
-      e.stopPropagation();
-      if (!played) { armed = true; sting(); btn.textContent = '♪ звук'; return; }
-      armed = !armed;
-      btn.classList.toggle('on', armed);
-      btn.setAttribute('aria-pressed', armed ? 'true' : 'false');
-      btn.textContent = armed ? '♪ звук' : '✕ без звука';
-      if (!armed) { try { speechSynthesis.cancel(); } catch (err) {} }
-    });
-  }
 })();
 </script>
 """)
@@ -1289,6 +1233,7 @@ def render_dashboard(summaries: list, quota: dict = None):
         cov_cycles=cov["cycles"], cov_cycles_txt=_num(cov["cycles"]),
         cov_moves=cov["moves"], cov_moves_txt=_num(cov["moves"]),
         cov_signals=cov["signals"], cov_signals_txt=_num(cov["signals"]),
+        funnel_block=_funnel_block(storage.funnel_stats(24), span_label),
         ticker=_ticker(summaries),
         summaries_html=_summaries_html(summaries),
         top_books=_top_books(storage.top_books(10)),

@@ -9,7 +9,7 @@ price before and what is it now, and where can that same price still be taken.
 Nothing else. Earlier versions listed every outcome with a fair-value figure
 and a bookmaker list in parentheses, which buried the one line that matters.
 
-Only events whose drop cleared the 10% threshold AND still have somewhere to
+Only events whose drop cleared SPIKE_THRESHOLD_PCT AND still have somewhere to
 bet are sent -- a move you can no longer get on is not worth a notification,
 and neither is a 1% drift.
 """
