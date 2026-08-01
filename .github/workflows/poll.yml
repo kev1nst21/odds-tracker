@@ -85,6 +85,16 @@ jobs:
 
       - run: pip install -r requirements.txt
 
+      # One complete cycle against a stubbed provider, before a single credit
+      # is spent. Added 2026-08-01 after a five-hour silent outage: detector.py
+      # shipped calling a storage function that had been left out of the
+      # upload, so every poll died on AttributeError. runner.py catches
+      # per-poll exceptions, so the job stayed green while the site quietly
+      # froze on its last good render -- the worst kind of failure, one that
+      # looks like a calm market. Offline, costs nothing, and fails loudly.
+      - name: Smoke test the pipeline before spending credits
+        run: python test_smoke.py
+
       - name: Poll the market for this window
         env:
           THEODDSAPI_KEY: ${{ secrets.THEODDSAPI_KEY }}
