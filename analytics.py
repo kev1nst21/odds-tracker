@@ -62,6 +62,7 @@ from config import (
     ENTRY_MIN_CAPTURE_PCT,
     ENTRY_MAX_OVER_OLD_PCT,
     MIN_MARKET_BOOKS,
+    MIN_MOVED_BOOKS,
     OUTLIER_MAX_DEVIATION_PCT,
 )
 
@@ -586,6 +587,11 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
                 "stars": _stars(down_books, sharp_down),
                 "spiked": (fixture_id, side) in spiked_sides,
                 "thin_market": thin_market,
+                # Breadth, asked properly: did several independent books move
+                # the same way, or is this one trader? A sharp book moving
+                # alone counts -- Pinnacle shortening a price is the reference
+                # the rest of the market follows, not a typo.
+                "well_evidenced": bool(len(down_books) >= MIN_MOVED_BOOKS or sharp_down),
                 "entries": entries[:3],
                 "entry_price": entries[0][1] if entries else None,
                 "entry_book": entries[0][0] if entries else None,
@@ -604,11 +610,15 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
 
         # The bet is on the side money went INTO. Never on the side that merely
         # drifted up as a mechanical consequence -- see the module docstring.
-        # A move in a two-bookmaker market is not evidence of anything -- see
-        # MIN_MARKET_BOOKS. Those outcomes are excluded from being picked as
-        # the bet rather than merely down-starred, because a one-star signal
-        # still gets sent and still gets counted.
-        shortening = [o for o in outcomes if o["down_count"] > 0 and not o["thin_market"]]
+        #
+        # 2026-08-01: thin markets are no longer excluded here. They used to
+        # be, and the effect was that a drop in a small league produced no
+        # summary at all -- so it never reached the movements log either, and
+        # the "Движения" page sat at zero while the funnel counted six. Weak
+        # evidence now blocks the ALERT (see well_evidenced below), not the
+        # record of what happened. We log everything we see and are honest
+        # about which ones we would actually bet.
+        shortening = [o for o in outcomes if o["down_count"] > 0]
         bet = None
         if shortening:
             bet = max(shortening, key=lambda o: (o["spiked"], o["down_count"],
@@ -624,7 +634,10 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
         if big:
             funnel["big_drop"] += 1
             lead = max(big, key=lambda o: abs(o["drop_pct"] or 0))
-            if lead["thin_market"]:
+            if not lead["well_evidenced"]:
+                # Key name kept so the stored funnel history stays comparable
+                # across this change; the label on the site is what the reader
+                # sees, and that now says what this bucket really is.
                 funnel["thin_market"] += 1
             elif lead["left_count"] == 0:
                 funnel["all_books_moved"] += 1
@@ -654,6 +667,11 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
         # Sub-threshold drift still shows on the site but must never reach the
         # bot -- the user explicitly does not want small moves pushed to them.
         big_enough = bool(bet and abs(bet["drop_pct"] or 0) >= SPIKE_THRESHOLD_PCT * 100)
+        # One book moving is not a market move, whatever the size of it. This
+        # is the guard that used to be MIN_MARKET_BOOKS, asked about the thing
+        # that actually matters. It gates the alert only: the movement is
+        # still recorded and still shown.
+        well_evidenced = bool(bet and bet["well_evidenced"])
 
         summaries.append({
             "fixture_id": fixture_id,
@@ -667,7 +685,8 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
             "has_entry": has_entry,
             "entry_closed": bool(bet and not has_entry),
             "big_move": big_enough,
-            "alertable": big_enough and has_entry,
+            "alertable": big_enough and has_entry and well_evidenced,
+            "well_evidenced": well_evidenced,
             "stars": stars,
             "strategy": strategy,
             "safe": safe if (has_entry and bet["entry_price"] > SAFE_TRIGGER_PRICE) else None,

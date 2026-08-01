@@ -1,26 +1,26 @@
 """Polls the market repeatedly inside one CI run.
 
 Why this file exists: GitHub Actions refuses to schedule a workflow more often
-than every 5 minutes, and even that it runs late routinely -- roughly one run
-in ten arrives 5+ minutes behind, and a missed window is dropped rather than
-retried. A cron of "*/3" simply does not work there.
+than every 5 minutes, and even that it runs late routinely -- measured in
+production on 2026-07-30, a "*/30" schedule fired 4 times in 19 hours instead
+of 38. A cron of "*/3" simply does not work there.
 
-So the workflow fires every PUBLISH_INTERVAL_MINUTES and this runner does its
-own timed loop inside that window. That is the only way to get a real 3-minute
-cadence out of GitHub, and it has a useful side effect: the polls are spaced by
-a real clock rather than by whenever the runner happened to boot, so the
-intervals in the experiment are actually the intervals we claim they are.
+So the workflow starts a run and this runner does its own timed loop inside
+the window. That is the only way to get a real 3-minute cadence out of GitHub,
+and it has a useful side effect: the polls are spaced by a real clock rather
+than by whenever the runner happened to boot, so the intervals in the
+experiment are actually the intervals we claim they are.
 
 Three things it is careful about:
 
   * Poll times are anchored to absolute wall-clock multiples of the interval,
-    not to "now + interval". Otherwise every run drifts by however long the
+    not to "now + interval". Otherwise every cycle drifts by however long the
     previous poll took (~60s), and by the end of the day the 3-minute bucket is
     really a 4-minute one -- which would quietly invalidate the comparison the
     whole experiment exists to make.
-  * It stops before the next scheduled run starts, so two runs never overlap
-    and a late-starting run shortens itself instead of being killed mid-write.
-    A killed run loses its database cache, and with it the track record.
+  * It stops before the next run is due, so two runs never overlap and a
+    late-starting run shortens itself instead of being killed mid-write. A
+    killed run loses its database cache, and with it the track record.
   * It watches the provider's credit balance. A 3-minute cadence burns quota
     ten times faster than a 30-minute one; running the account to zero would
     take the whole product offline, which is far worse than a few missed polls.
@@ -40,7 +40,7 @@ import main
 import odds_client
 
 # Leave the tail of the window free so the workflow still has time to publish
-# the dashboard before the next run is due.
+# the dashboard before the next run starts.
 TAIL_MARGIN_SECONDS = 150
 
 
@@ -77,8 +77,8 @@ def _quota_exhausted() -> bool:
         return False
     if remaining <= QUOTA_RESERVE_CREDITS:
         print(f"[runner] stopping: only {remaining} credits left "
-              f"(reserve is {QUOTA_RESERVE_CREDITS}); the next scheduled run "
-              f"will pick up again once the plan rolls over")
+              f"(reserve is {QUOTA_RESERVE_CREDITS}); polling resumes once the "
+              f"plan rolls over")
         return True
     return False
 

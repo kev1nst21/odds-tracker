@@ -291,7 +291,29 @@ ENTRY_MAX_OVER_OLD_PCT = float(os.getenv("ENTRY_MAX_OVER_OLD_PCT", "10.0"))
 # Consequence worth knowing: esports fixtures that only two of the four
 # OddsPapi books cover will now produce no signal. That is the correct
 # outcome. No signal beats a fake one.
-MIN_MARKET_BOOKS = int(os.getenv("MIN_MARKET_BOOKS", "4"))
+# 2026-08-01: lowered from 4 to 3, and it stopped being an alert filter.
+# Measured over 24 hours with the widened line: the market produced 6 drops
+# past the threshold, and this rule rejected SIX OF SIX. Nothing else in the
+# funnel rejected anything -- the entry rules never even got a look. The
+# reason is structural, not a fluke: the whole point of the wide sweep is
+# lower divisions and small federations, and a Latvian second-division match
+# is quoted by three bookmakers, not eight. Demanding a crowd in exactly the
+# markets chosen for having no crowd guarantees zero signals forever.
+#
+# Breadth is still the confidence signal, but it is now measured by how many
+# books MOVED (MIN_MOVED_BOOKS) rather than by how many exist. That is the
+# thing the original incident was actually about: "просело у 1 из 2" is
+# meaningless because ONE book moved, not because only two were quoting.
+MIN_MARKET_BOOKS = int(os.getenv("MIN_MARKET_BOOKS", "3"))
+
+# How many independent bookmakers must have moved the same way before a drop
+# is allowed to become a signal. This replaces MIN_MARKET_BOOKS as the guard
+# against reading one trader's typo as informed money -- it asks the question
+# that matters (do several books agree?) instead of a proxy for it (is this a
+# big league?). A sharp book moving on its own also clears it: Pinnacle
+# shortening a price is not a typo, it is the reference the rest of the
+# market follows.
+MIN_MOVED_BOOKS = int(os.getenv("MIN_MOVED_BOOKS", "2"))
 
 # A single quote further than this from the median of all quotes on the same
 # outcome is treated as broken rather than as an opinion. Bookmakers disagree

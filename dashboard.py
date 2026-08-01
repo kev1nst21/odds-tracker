@@ -30,6 +30,7 @@ import storage
 from config import (
     DASHBOARD_PATH,
     FLAT_STAKE,
+    MAX_SPORTS_PER_CYCLE,
     POLL_INTERVAL_MINUTES,
     PUBLISH_INTERVAL_MINUTES,
     CADENCE_LABEL,
@@ -152,7 +153,7 @@ def _funnel_block(f: dict, span: str) -> str:
     if not total:
         return ""
     parts = [
-        ("рынок меньше 4 контор", f.get("thin_market") or 0),
+        ("двинулась только одна контора — это не рынок", f.get("thin_market") or 0),
         ("просело уже у всех — брать негде", f.get("all_books_moved") or 0),
         ("вход вернул меньше половины падения", f.get("entry_too_low") or 0),
     ]
@@ -1215,7 +1216,7 @@ $ticker
 
   <footer>
     Время везде UTC · порог алерта $threshold_pct% · опрос каждые $poll_interval мин ·
-    страница перевыпускается раз в $publish_interval мин · <a href="ledger.json">ledger.json</a><br>
+    страница перевыпускается раз в $publish_interval мин · $quota_note<a href="ledger.json">ledger.json</a><br>
     Это расчёт по движению рынка, а не рекомендация. Ставки — риск потерять деньги.
     Материал не адресован лицам младше 18 лет.
   </footer>
@@ -1410,7 +1411,20 @@ def render_dashboard(summaries: list, quota: dict = None):
 
     _write_ledger(aggressive)
 
+    # Printed on the page, not just in the CI log. The credit balance decides
+    # how wide the line and how fast the cadence can be, and reading it used
+    # to mean opening a workflow run by hand -- which is exactly the sort of
+    # number that quietly goes unwatched until the API stops answering.
+    q = quota or {}
+    quota_note = ""
+    if q.get("remaining") is not None:
+        per_day = (24 * 60 / max(1, POLL_INTERVAL_MINUTES)) * MAX_SPORTS_PER_CYCLE
+        days = q["remaining"] / per_day if per_day else 0
+        quota_note = (f"кредитов осталось {int(q['remaining']):,} "
+                      f"(≈{days:.0f} дн. при текущем темпе) · ").replace(",", " ")
+
     html_out = PAGE.safe_substitute(
+        quota_note=quota_note,
         updated_iso=(fetched or now).isoformat(),
         updated_ago=_ago(meta.get("fetched_at"), now),
         freshness_class="live" if fresh else "stale",

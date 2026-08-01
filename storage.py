@@ -397,6 +397,63 @@ def get_latest_price(fixture_id, bookmaker, market_id, outcome_id, player_key):
         return (row["fetched_at"], row["price"]) if row else None
 
 
+def get_baseline_price(fixture_id, bookmaker, market_id, outcome_id, player_key,
+                       since_iso, floor_iso=None):
+    """The price this line was showing `since_iso` ago -- what a move is
+    measured against.
+
+    Prefers the newest snapshot at or before since_iso, so the comparison is
+    genuinely "an hour ago" rather than "the oldest thing we happen to hold".
+    When the line is younger than the window (a fixture that only just opened)
+    it falls back to the oldest snapshot inside the window, because a line
+    that appeared 20 minutes ago and has already moved 12% is exactly the kind
+    of thing worth seeing. Returns None when the only history is older than
+    floor_iso -- see BASELINE_MAX_AGE_MULT.
+    """
+    with _conn() as conn:
+        row = conn.execute(
+            """
+            SELECT fetched_at, price FROM odds_snapshots
+            WHERE fixture_id=? AND bookmaker=? AND market_id=? AND outcome_id=?
+              AND player_key=? AND fetched_at<=?
+            ORDER BY fetched_at DESC LIMIT 1
+            """,
+            (fixture_id, bookmaker, market_id, outcome_id, player_key, since_iso),
+        ).fetchone()
+        if row is None:
+            row = conn.execute(
+                """
+                SELECT fetched_at, price FROM odds_snapshots
+                WHERE fixture_id=? AND bookmaker=? AND market_id=? AND outcome_id=?
+                  AND player_key=? AND fetched_at>?
+                ORDER BY fetched_at ASC LIMIT 1
+                """,
+                (fixture_id, bookmaker, market_id, outcome_id, player_key, since_iso),
+            ).fetchone()
+    if row is None:
+        return None
+    if floor_iso and row["fetched_at"] < floor_iso:
+        return None  # too stale to be a baseline -- that is drift, not a move
+    return (row["fetched_at"], row["price"])
+
+
+def next_rotation_offset(step: int, span: int) -> int:
+    """Advance the wide-coverage cursor and return where this cycle starts.
+
+    Kept in the meta table rather than derived from the clock so a skipped or
+    doubled run can't make the sweep jump a league permanently.
+    """
+    if span <= 0 or step <= 0:
+        return 0
+    try:
+        cur = int(get_meta("wide_rotation_offset") or 0)
+    except (TypeError, ValueError):
+        cur = 0
+    cur %= span
+    set_meta("wide_rotation_offset", str((cur + step) % span))
+    return cur
+
+
 def get_closing_price(fixture_id, bookmaker, market_id, outcome_id, player_key, before_iso):
     """Most recent snapshot for this exact line at or before before_iso
     (normally the match's start_time) -- used as the 'closing line' for CLV.
