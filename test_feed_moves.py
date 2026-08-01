@@ -106,3 +106,31 @@ for needle in ("Движения", "только что", "feedtable", "Osaka",
                "коэф. до падения", "Все за сутки", "Hapoel"):
     assert needle in page, f"page is missing: {needle}"
 print(f"page ok: {len(page)} bytes, all blocks present -> {path}")
+
+# --- a coefficient must never be truncated into nonsense -------------------
+# Reported 2026-08-01: "Terence Atmane — Jack Draper ... коф на +1.5 указано 1".
+# The pick text carried the price ("... +1.5 ≈ 1.60 (взять ...)") and every
+# table cut the label to fit, landing mid-number.
+legacy = "Terence Atmane — фора по сетам +1.5 ≈ 1.60 (взять хотя бы один сет)"
+short = dashboard._short(legacy, 40)
+assert "≈" not in short, short          # the price never rides inside the label
+assert "+1.5" in short, short           # but the handicap LINE must survive
+assert short.startswith("Terence Atmane — фора по сетам"), short
+assert not short.rstrip("…").endswith((".", ",", "≈")), short
+print(f"truncation ok: {short!r} — no dangling number")
+
+atmane = summary("f4", "Terence Atmane", "Jack Draper", "home", "Terence Atmane",
+                 3.16, 2.80, 3.05, "coolbet", 3, soon,
+                 {"kind": "set_handicap", "pick": legacy, "price": None,
+                  "est_price": 1.60, "gradeable": True, "note": "теннис"})
+atmane["fresh"] = True
+row = dashboard._event_row(atmane)
+assert "~1.60" in row, row
+assert "≈ 1." not in row and "≈ 1<" not in row, row
+print("truncation ok: the row shows ~1.60 in full, never a bare '1'")
+
+# and a clean modern pick keeps its price exactly once
+clean = dict(atmane)
+clean["optimal"] = dict(atmane["optimal"], pick="Terence Atmane — фора по сетам +1.5 (взять хотя бы один сет)")
+assert dashboard._event_row(clean).count("1.60") == 1, "price rendered twice"
+print("truncation ok: price appears exactly once")

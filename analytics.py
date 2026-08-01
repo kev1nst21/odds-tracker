@@ -380,8 +380,13 @@ def _safe_variant(bet: dict, by_book: dict, sport_key: str, trigger: float = Non
                 _median([m.get(other) for m in by_book.values() if m.get(other)]),
                 sport_key,
             )
+            # The number deliberately does NOT go into this string. It used to
+            # ("фора по сетам +1.5 ≈ 1.60 (взять хотя бы один сет)"), and every
+            # display site truncates the label to fit a table cell -- which cut
+            # straight through the price and showed the coefficient as "1".
+            # One number, one place: est_price below, rendered on its own.
             if est:
-                hint = f"фора по сетам +1.5 ≈ {est:.2f} (взять хотя бы один сет)"
+                hint = "фора по сетам +1.5 (взять хотя бы один сет)"
         # A +1.5 SET handicap is the one handicap we can settle without buying
         # the market: it wins whenever our player takes at least one set, and
         # the score endpoint already reports sets for tennis. So it counts

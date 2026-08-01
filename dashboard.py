@@ -21,6 +21,7 @@ the countdown script got silently corrupted once already.
 """
 import html
 import json
+import re
 import os
 from datetime import datetime, timedelta, timezone
 from string import Template
@@ -336,14 +337,13 @@ def _event_row(s: dict) -> str:
         tags.append(f"<span class='tag opt' title='{html.escape(opt.get('note') or '')}'>"
                     f"ОПТИМАЛЬНАЯ — двойной шанс {opt['price']:.2f}</span>")
     else:
-        # Even without a quoted price the tag carries a number, because
-        # "фора по сетам" with no figure is not something anyone can act on.
-        # The hint text already carries the figure for tennis, so only add one
-        # when it doesn't -- otherwise the tag reads "≈ 2.17  ~2.17".
+        # The label is truncated to fit the cell, so the price is rendered
+        # separately and never lives inside the truncated text -- that is
+        # exactly how a 1.60 once displayed as "1.".
         est = opt.get("est_price")
-        shown = f" ~{est:.2f}" if est and "≈" not in (opt.get("pick") or "") else ""
+        shown = f" ~{est:.2f}" if est else ""
         tags.append(f"<span class='tag safe' title='{html.escape(opt.get('note') or '')}'>"
-                    f"🛡 ОПТИМАЛЬНАЯ — {html.escape(opt['pick'])[:40]}{shown}</span>")
+                    f"🛡 ОПТИМАЛЬНАЯ — {html.escape(_short(opt['pick'], 44))}{shown}</span>")
 
     return (
         # Deliberately NOT a .reveal element: the feed is the one thing on the
@@ -521,14 +521,14 @@ def _active_signals(rows) -> str:
                         f"<small>та же ставка</small>")
         elif kind and r["opt_price"]:
             opt_cell = (f"<span class='price'>{r['opt_price']:.2f}</span>"
-                        f"<small>{html.escape(str(r['opt_pick']))[:30]}</small>")
+                        f"<small>{html.escape(_short(str(r['opt_pick']), 34))}</small>")
         elif kind:
             # "~" is load-bearing: this price is derived from the moneyline,
             # not quoted by a bookmaker, and the reader has to be able to tell.
             txt, est = _opt_price_text(r)
             cls = "price est" if est else "price"
             opt_cell = (f"<span class='{cls}'>{txt}</span>"
-                        f"<small>{html.escape(str(r['opt_pick']))[:30]}</small>")
+                        f"<small>{html.escape(_short(str(r['opt_pick']), 34))}</small>")
         items.append(
             f"<tr class='row'><td class='c-stars'>{'★' * (r['stars'] or 0)}</td>"
             f"<td class='c-ev'><b>{html.escape(event)}</b>"
@@ -572,6 +572,28 @@ def _bankroll_block(stats: dict) -> str:
         f"которую мы называли. Это не обещание будущего результата.</div>"
         f"</div>"
     ).replace(",", " ")
+
+
+_EMBEDDED_PRICE = re.compile(r"\s*≈\s*\d+[.,]?\d*")
+
+
+def _short(text: str, limit: int) -> str:
+    """Truncate a label without ever cutting through a number.
+
+    The bug this exists for: a pick read "Terence Atmane — фора по сетам +1.5
+    ≈ 1.60 (взять хотя бы один сет)", the table cut it at 40 characters, and
+    the coefficient rendered as "1." -- a wrong price is worse than no price.
+    Any embedded "≈ N.NN" is stripped first (rows logged before the price
+    moved out of this string still carry one), then the cut lands on a word
+    boundary.
+    """
+    text = _EMBEDDED_PRICE.sub("", text or "").strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    if " " in cut:
+        cut = cut[:cut.rindex(" ")]
+    return cut.rstrip(" ,.—-") + "…"
 
 
 def _opt_price_text(row):
