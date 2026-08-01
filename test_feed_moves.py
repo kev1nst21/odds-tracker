@@ -134,3 +134,31 @@ clean = dict(atmane)
 clean["optimal"] = dict(atmane["optimal"], pick="Terence Atmane — фора по сетам +1.5 (взять хотя бы один сет)")
 assert dashboard._event_row(clean).count("1.60") == 1, "price rendered twice"
 print("truncation ok: price appears exactly once")
+
+# --- both strategies get their own verdict, and the money is honest --------
+# Reported 2026-08-01: Cocciaretto — Osaka showed only "не зашла", though the
+# straight bet lost and the set handicap won. And the optimal bank claimed
+# +$940 from that one bet -- it paid a ~1.60 handicap at the 5.70 moneyline.
+row = {"result": "miss", "opt_result": "hit", "opt_kind": "set_handicap",
+       "opt_pick": "Cocciaretto — фора по сетам +1.5 ≈ 1.62 (взять хотя бы один сет)",
+       "opt_price": None, "opt_est_price": 1.62}
+chips = dashboard._both_results(row)
+assert "агрессивная" in chips and "не зашла" in chips, chips
+assert "оптимальная" in chips and "зашла" in chips, chips
+detail = dashboard._opt_detail_row(row)
+assert "~1.62" in detail and "≈" not in detail, detail
+print("verdicts ok: both strategies reported separately, with what optimal bet")
+
+# identical bets must not be reported twice
+same = dashboard._both_results({"result": "hit", "opt_result": "hit", "opt_kind": "straight"})
+assert same.count("зашла") == 1 and "обе стратегии" in same, same
+print("verdicts ok: a straight optimal play reports once, not twice")
+
+# the money: a handicap with no bought price stays OUT of the bank
+storage.mark_resolved(1, "miss", now.isoformat(), None, None, "hit")
+agg = storage.alert_stats("prematch", "aggressive")
+opt = storage.alert_stats("prematch", "optimal")
+assert opt["profit"] <= 0, f"optimal bank paid an unbought handicap: {opt['profit']}"
+assert opt["hits"] >= 1, "the handicap win vanished from the win rate too"
+print(f"bank ok: optimal win counted in заходимость ({opt['hits']} hit), "
+      f"profit {opt['profit']:+.0f} — the 5.70 moneyline is no longer paid for a ~1.6 фора")

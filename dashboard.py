@@ -569,9 +569,28 @@ def _bankroll_block(stats: dict) -> str:
         f"вы бы {word} <b>{sign}${abs(profit):,.0f}</b>. "
         f"Оборот ${staked:,.0f}, доходность {roi:+.1f}%.</div>"
         f"<div class='bank-note'>Считается по уже сыгравшим сигналам и по той цене, "
-        f"которую мы называли. Это не обещание будущего результата.</div>"
+        f"которую мы называли. Это не обещание будущего результата.{_unpriced_note(stats)}</div>"
         f"</div>"
     ).replace(",", " ")
+
+
+def _unpriced_note(stats: dict) -> str:
+    """Says out loud how many settled bets are missing from the money.
+
+    A handicap we never bought a price for is settleable from the score but
+    not payable, so it counts in the win rate and not in the bank. Without
+    saying so the two numbers silently disagree -- which is how "+$940 from
+    one bet" happened: a set handicap worth about 1.60 got paid at the 5.70
+    moneyline because the price fell back to the wrong column.
+    """
+    if stats.get("strategy") != "optimal":
+        return ""
+    gap = (stats.get("resolved") or 0) - (stats.get("graded_n") or 0)
+    if gap <= 0:
+        return ""
+    return (f" Ещё {gap} {_plural(gap, 'ставка сыграла', 'ставки сыграли', 'ставок сыграли')}"
+            f" по форе — они считаются в заходимости, но не в деньгах: цену форы мы не"
+            f" выкупаем, а выдумывать её нечестно.")
 
 
 _EMBEDDED_PRICE = re.compile(r"\s*≈\s*\d+[.,]?\d*")
@@ -753,6 +772,55 @@ def _top_books(rows) -> str:
     return "<ol class='books'>" + "".join(items) + "</ol>"
 
 
+_RESULT_LABEL = {"hit": ("hit", "✅ зашла"), "miss": ("miss", "❌ не зашла"),
+                 "n/a": ("pending", "— н/д")}
+
+
+def _verdict_chip(result, prefix: str) -> str:
+    cls, label = _RESULT_LABEL.get(result, ("pending", "⏳ ждём"))
+    return f"<span class='{cls}'>{prefix}: {label}</span>"
+
+
+def _both_results(row) -> str:
+    """Aggressive and optimal side by side.
+
+    They are not the same bet -- on Cocciaretto — Osaka the straight 5.70 lost
+    while the +1.5 set handicap won -- so a single verdict on the row can only
+    ever be right about one of them.
+    """
+    keys = row.keys() if hasattr(row, "keys") else row
+    agg = row["result"] if "result" in keys else None
+    opt = row["opt_result"] if "opt_result" in keys else None
+    kind = row["opt_kind"] if "opt_kind" in keys else None
+    if not kind:
+        return _verdict_chip(agg, "агрессивная")
+    if kind == "straight":
+        # Identical bet, identical verdict -- two chips would be noise.
+        return _verdict_chip(agg, "обе стратегии")
+    return (f"<span class='verdicts'>{_verdict_chip(agg, 'агрессивная')}"
+            f"{_verdict_chip(opt, 'оптимальная')}</span>")
+
+
+def _opt_detail_row(b) -> str:
+    """What the optimal line actually bet, spelled out under the result.
+
+    Otherwise "оптимальная: зашла" sits there with no indication of WHICH bet
+    won -- and it is usually not the one named at the top of the card.
+    """
+    keys = b.keys() if hasattr(b, "keys") else b
+    kind = b["opt_kind"] if "opt_kind" in keys else None
+    if not kind or kind == "straight":
+        return ""
+    pick = _short(str(b["opt_pick"] or ""), 60) if "opt_pick" in keys else ""
+    price = None
+    if "opt_price" in keys and b["opt_price"]:
+        price = f"{b['opt_price']:.2f}"
+    elif "opt_est_price" in keys and b["opt_est_price"]:
+        price = f"~{b['opt_est_price']:.2f}"
+    tail = f" @ <b>{price}</b>" if price else ""
+    return (f"<tr><td>Оптимальная ставила</td><td>{html.escape(pick)}{tail}</td></tr>")
+
+
 def _last_bets(bets, limit: int = 6) -> str:
     if not bets:
         return "<p class='empty small'>Ставок пока нет — появятся с первым сигналом.</p>"
@@ -763,10 +831,11 @@ def _last_bets(bets, limit: int = 6) -> str:
         stars = "★" * (b["stars"] or 0)
         entry = f"{b['entry_price']:.2f}" if b["entry_price"] else "—"
         if b["resolved"]:
-            status = {"hit": "<span class='hit'>✅ зашла</span>",
-                      "miss": "<span class='miss'>❌ не зашла</span>",
-                      "n/a": "<span class='pending'>— н/д</span>"}.get(
-                          b["result"], f"<span class='pending'>{html.escape(str(b['result']))}</span>")
+            # BOTH verdicts, always. "❌ не зашла" alone was actively
+            # misleading on Cocciaretto — Osaka: the straight bet lost and the
+            # set handicap won, and the row showed only the loss. The two
+            # lines place different bets, so they get two answers.
+            status = _both_results(b)
         else:
             status = "<span class='pending'>⏳ ждём матч</span>"
         clv = f"{b['clv_pct'] * 100:+.1f}%" if b["clv_pct"] is not None else "—"
@@ -789,6 +858,7 @@ def _last_bets(bets, limit: int = 6) -> str:
             f"<tr><td>Старт матча</td><td class='mono'>{_fmt_dt(b['start_time'])}</td></tr>"
             f"<tr><td>Сигнал зафиксирован</td><td class='mono'>{_fmt_dt(b['detected_at'])}</td></tr>"
             f"<tr><td>Результат</td><td>{status}</td></tr>"
+            f"{_opt_detail_row(b)}"
             f"<tr><td>CLV</td><td class='mono'>{clv}</td></tr>"
             "</table></div></details>"
         )
@@ -997,6 +1067,7 @@ tbody tr:hover td,table tr.row:hover td{background:rgba(255,255,255,.022)}
 .cd-to.soon{background:rgba(255,197,49,.13);color:var(--warn)}
 .cd-to.live{background:rgba(255,61,129,.13);color:var(--mag)}
 .cd-to.done{background:rgba(255,255,255,.05);color:var(--ink3)}
+.verdicts{display:flex;flex-direction:column;gap:3px;align-items:flex-end;font-size:12.5px;white-space:nowrap}
 .c-out{font-weight:600}
 .tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px}
 .tag{font-size:9.5px;font-weight:800;letter-spacing:.09em;padding:3px 7px;border-radius:6px;
@@ -1247,7 +1318,10 @@ $ticker
   <p class="lead">Обе стратегии считаются по <b>одним и тем же</b> сигналам: оптимальная —
   это просто подмножество с коэффициентом не выше $optimal_max. Так видно, стоит ли
   отсекать длинные коэффициенты, а не сравниваются две разные выборки.
-  Всё считается по цене, которую мы называли, и по уже сыгравшим матчам.</p>
+  Здесь <b>только сыгравшие матчи</b>, у которых уже есть результат — ставки, которые
+  ещё ждут своего матча, лежат выше, в «Открытых». Считаем по цене, которую называли.
+  У двух стратегий бывают <b>разные исходы на одном матче</b>: прямая ставка может не
+  зайти, а фора по тому же событию — зайти. Поэтому в каждой строке стоят оба вердикта.</p>
   <div class="strats">
     $stats_aggressive
     $stats_optimal
@@ -1256,7 +1330,7 @@ $ticker
   <h3 style="font-family:Unbounded,sans-serif;font-size:15px;margin:26px 0 8px;text-transform:uppercase">Сыгравшие сигналы</h3>
   $resolved_table
 
-  <h3 style="font-family:Unbounded,sans-serif;font-size:15px;margin:26px 0 8px;text-transform:uppercase">Последние сигналы — $last_n из $total_n</h3>
+  <h3 style="font-family:Unbounded,sans-serif;font-size:15px;margin:26px 0 8px;text-transform:uppercase">Разбор каждой ставки — $last_n сыгравших</h3>
   $last_bets
 
   <div class="honest">
@@ -1463,7 +1537,10 @@ def render_dashboard(summaries: list, quota: dict = None):
     aggressive = storage.alert_stats("prematch", "aggressive")
     optimal = storage.alert_stats("prematch", "optimal")
     active = storage.active_signals(40)
-    last_bets = storage.recent_bets(10, "prematch")
+    # Only matches that are actually over. "Проверка сигналов" is the
+    # track record; a pending bet there is not proof of anything, and it
+    # already has its own block in "Открытые ставки".
+    last_bets = storage.recent_bets(10, "prematch", resolved_only=True)
 
     now = datetime.now(timezone.utc)
     fetched = _parse_iso(meta.get("fetched_at"))

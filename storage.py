@@ -703,7 +703,16 @@ def _strategy_columns(strategy: str):
     priced from its own columns.
     """
     if strategy == "optimal":
-        return "COALESCE(opt_result, result)", "COALESCE(opt_price, entry_price)"
+        # The price falls back to entry_price ONLY when the optimal line took
+        # the identical bet. It used to fall back always, and that produced a
+        # flatly false number: the Cocciaretto set handicap won, the fallback
+        # paid it at the 5.70 moneyline, and the bank claimed +$940 from a bet
+        # worth about 1.60. A handicap we never bought a price for now returns
+        # NULL and drops out of the money entirely -- it still counts in the
+        # win rate, which is exactly what we promised: "заходимость считаем,
+        # прибыль нет: цену мы не выкупаем".
+        return ("COALESCE(opt_result, result)",
+                "CASE WHEN opt_kind='straight' THEN entry_price ELSE opt_price END")
     return "result", "entry_price"
 
 
@@ -799,7 +808,8 @@ def alert_stats(kind: str = "prematch", strategy: str = "aggressive"):
         }
 
 
-def recent_bets(limit: int = 5, kind: str = "prematch", strategy: str = None):
+def recent_bets(limit: int = 5, kind: str = "prematch", strategy: str = None,
+                resolved_only: bool = False):
     """The last N bets we called, resolved or not. Unlike alert_stats()['recent']
     this deliberately includes pending ones -- right after a stats reset there
     are no finished matches yet, and a panel that renders empty for hours looks
@@ -812,7 +822,8 @@ def recent_bets(limit: int = 5, kind: str = "prematch", strategy: str = None):
             "       entry_price, entry_book, start_time, detected_at, "
             "       resolved, result, clv_pct, resolved_at, "
             "       opt_kind, opt_pick, opt_price, opt_book, opt_gradeable, opt_result, opt_est_price "
-            f"FROM tracked_alerts WHERE kind=?{sf} "
+            f"FROM tracked_alerts WHERE kind=?{sf}"
+            + (" AND resolved=1 " if resolved_only else " ") +
             "ORDER BY detected_at DESC LIMIT ?",
             (kind,) + sp + (limit,),
         ).fetchall()
