@@ -99,6 +99,20 @@ RESULT_CHECK_DELAY_HOURS = int(os.getenv("RESULT_CHECK_DELAY_HOURS", "3"))
 # quota budget dominated by the odds-polling cadence, not results-checking.
 RESULTS_CHECK_INTERVAL_HOURS = int(os.getenv("RESULTS_CHECK_INTERVAL_HOURS", "3"))
 
+# Live score for matches already in play, shown next to "матч идёт" on the
+# site and in the bot. Each sport asked about costs one credit per cycle, so
+# this is capped: only sports we actually hold an in-play position in get
+# asked, and never more than this many at once. On a quiet night it spends
+# nothing; on a busy one, a couple of credits rather than the whole card.
+LIVE_SCORE_MAX_SPORTS = int(os.getenv("LIVE_SCORE_MAX_SPORTS", "2"))
+
+# After this long, no match in any sport we track is still being played, so
+# the site stops calling it "матч идёт" and says it is over and waiting to be
+# graded. Covers the longest realistic case -- a five-set tennis match with
+# rain delays -- rather than the average one, because being early with
+# "завершён" would be the same class of lie in the other direction.
+MATCH_MAX_DURATION_HOURS = float(os.getenv("MATCH_MAX_DURATION_HOURS", "4"))
+
 # Region parameter for The Odds API -- determines which bookmakers come back.
 # Confirmed live (2026-07-29) via the bookmakers-by-region page: Pinnacle and
 # 1xBet (our two Asian/sharp reference books) both live under the "eu" region

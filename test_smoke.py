@@ -100,4 +100,53 @@ print(f"smoke ok: dashboard rendered, {len(html)} bytes, all sections present")
 
 picked = odds_client.select_sport_keys(SPORTS)
 print(f"smoke ok: sports selected this cycle -> {picked}")
-sys.exit(0)
+
+# --- live score for a match already in play -------------------------------
+# Requested 2026-08-01: "если у нас матч идет, то пиши актуальный счет".
+import dashboard  # noqa: E402
+import results  # noqa: E402
+
+with storage._conn() as conn:
+    conn.execute("UPDATE tracked_alerts SET start_time=?",
+                 ((now - timedelta(minutes=30)).isoformat(),))
+    conn.execute("UPDATE movements SET start_time=?",
+                 ((now - timedelta(minutes=30)).isoformat(),))
+    conn.commit()
+
+inplay = storage.inplay_fixtures(now.isoformat())
+assert inplay, "a match that kicked off 30 min ago was not seen as in play"
+
+odds_client.fetch_scores_for_sport = lambda sport_key, **k: [{
+    "id": f"fx_{sport_key}", "completed": False, "home_team": "Alpha",
+    "away_team": "Beta", "scores": [{"name": "Alpha", "score": "2"},
+                                    {"name": "Beta", "score": "1"}]}]
+saved = results.refresh_live_scores(now)
+assert saved >= 1, "live score fetch saved nothing"
+assert storage.live_scores_map(), "live score not readable back"
+
+dashboard.render_dashboard([])
+html2 = open(config.DASHBOARD_PATH, encoding="utf-8").read()
+assert "счёт 2:1" in html2, "live score missing from the rendered page"
+print(f"live score ok: {saved} fixture(s) refreshed, page shows 'счёт 2:1'")
+
+# and a stale score must not be printed next to "матч идёт"
+with storage._conn() as conn:
+    conn.execute("UPDATE live_scores SET updated_at=?",
+                 ((now - timedelta(hours=5)).isoformat(),))
+    conn.commit()
+assert not storage.live_scores_map(), "a five-hour-old score was still treated as live"
+print("live score ok: stale scores are dropped rather than shown")
+
+# --- "матч идёт" must stop lying once the match is over --------------------
+# Requested 2026-08-01: "если матч закончен то зачем он у нас отображается
+# как идет?" Past kick-off is not the same as in play.
+assert "матч идёт" in dashboard._countdown(
+    (now - timedelta(minutes=40)).isoformat(), "fx_none"), "a match 40 min in should read as live"
+assert "завершён" in dashboard._countdown(
+    (now - timedelta(hours=9)).isoformat(), "fx_none"), "a nine-hour-old match still read as live"
+
+dashboard._LIVE["fx_done"] = {"home_score": 2, "away_score": 1, "completed": 1,
+                              "updated_at": now.isoformat()}
+txt = dashboard._countdown((now - timedelta(minutes=40)).isoformat(), "fx_done")
+assert "завершён" in txt and "идёт" not in txt, txt
+print("countdown ok: finished matches say завершён, only running ones say идёт")

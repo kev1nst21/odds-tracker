@@ -30,6 +30,7 @@ import storage
 from config import (
     DASHBOARD_PATH,
     FLAT_STAKE,
+    MATCH_MAX_DURATION_HOURS,
     MAX_SPORTS_PER_CYCLE,
     POLL_INTERVAL_MINUTES,
     PUBLISH_INTERVAL_MINUTES,
@@ -110,7 +111,33 @@ def _ago(value, now=None) -> str:
 # feed
 # --------------------------------------------------------------------------
 
-def _countdown(start_iso) -> str:
+# Scores of matches currently in play, refreshed once per render. Module-level
+# rather than threaded through five row builders: every table on the page wants
+# the same map, and it is read-only for the duration of a render.
+_LIVE = {}
+
+
+def _live_badge(fixture_id, live=None) -> str:
+    """Score of a match in progress.
+
+    "матч идёт" on its own tells you the position is no longer actionable but
+    nothing about how it is going, which is the one thing worth knowing once
+    the whistle has blown. Only rendered from a score refreshed in the last
+    hour and a half (see storage.live_scores_map) -- a stale number here would
+    be worse than none.
+    """
+    row = (live if live is not None else _LIVE).get(fixture_id)
+    if not row or row["home_score"] is None or row["away_score"] is None:
+        return ""
+    hs, as_ = row["home_score"], row["away_score"]
+    fmt = lambda v: f"{v:.0f}" if float(v).is_integer() else f"{v:g}"  # noqa: E731
+    cls = "score done" if row["completed"] else "score"
+    label = "финал" if row["completed"] else "счёт"
+    return (f"<span class='{cls}' title='обновлено {_fmt_start(row['updated_at'])} UTC'>"
+            f"{label} {fmt(hs)}:{fmt(as_)}</span>")
+
+
+def _countdown(start_iso, fixture_id=None) -> str:
     """A live 'until kick-off' badge.
 
     Rendered server-side with a sensible value AND given the raw timestamp so
@@ -123,10 +150,22 @@ def _countdown(start_iso) -> str:
     if not dt:
         return ""
     left = (dt - datetime.now(timezone.utc)).total_seconds()
-    if left <= 0:
-        return "<span class='cd-to live' data-start=''>матч идёт</span>"
-    return (f"<span class='cd-to' data-start='{dt.isoformat()}'>"
-            f"{_left_words(left)}</span>")
+    if left > 0:
+        return (f"<span class='cd-to' data-start='{dt.isoformat()}'>"
+                f"{_left_words(left)}</span>")
+
+    # Past kick-off is not the same as "in play", and the page used to claim
+    # it was -- a match that finished yesterday still read "матч идёт" until
+    # the results pass got round to grading it, which could be hours. Now the
+    # badge only says that while the match can plausibly still be running:
+    # either the score feed confirms it is unfinished, or not enough time has
+    # passed for any sport to have ended.
+    row = _LIVE.get(fixture_id) if fixture_id else None
+    if row is not None and row["completed"]:
+        return "<span class='cd-to done' data-start=''>матч завершён</span>"
+    if row is None and -left > MATCH_MAX_DURATION_HOURS * 3600:
+        return "<span class='cd-to done' data-start=''>матч завершён · ждём результат</span>"
+    return "<span class='cd-to live' data-start=''>матч идёт</span>"
 
 
 def _left_words(seconds: float) -> str:
@@ -158,13 +197,13 @@ def _funnel_block(f: dict, span: str) -> str:
         ("вход вернул меньше половины падения", f.get("entry_too_low") or 0),
     ]
     rows = "".join(
-        f"<li><span>{label}</span><b>{n}</b></li>" for label, n in parts if n
+        f"<li><span>не ставили: {label}</span><b>{n}</b></li>" for label, n in parts if n
     )
     return (
-        f"<div class='funnel'><div class='fn-head'>Куда делись движения за {span}</div>"
-        f"<ul><li class='fn-top'><span>Поймали движений от порога</span><b>{total}</b></li>"
+        f"<div class='funnel'><div class='fn-head'>Движения за {span}</div>"
+        f"<ul><li class='fn-top'><span>Всего поймали движений</span><b>{total}</b></li>"
         f"{rows}"
-        f"<li class='fn-ok'><span>Дошло до сигнала</span><b>{f.get('signals') or 0}</b></li>"
+        f"<li class='fn-ok'><span>Из них поставили</span><b>{f.get('signals') or 0}</b></li>"
         f"</ul></div>"
     )
 
@@ -193,7 +232,8 @@ def _movements_table(rows) -> str:
                 pnl = f"<small class='pnl bad'>−${FLAT_STAKE:,.0f}</small>"
             st += pnl.replace(",", " ")
         else:
-            st = "<span class='pending'>⏳ ждём</span>" + _countdown(r["start_time"])
+            st = ("<span class='pending'>⏳ ждём</span>" + _countdown(r["start_time"], r["fixture_id"])
+                  + _live_badge(r["fixture_id"]))
         # Whether this move was also bettable is the single most useful fact
         # about it -- it is the difference between the ceiling and the money.
         mark = ("<span class='tag opt'>был вход</span>" if r["had_entry"]
@@ -313,7 +353,7 @@ def _event_row(s: dict) -> str:
         f"data-strat='{strategy}' data-fresh='{1 if s.get('fresh') else 0}'>"
         f"<td class='c-stars'>{'★' * stars}<span class='sr'>{stars} из 3</span></td>"
         f"<td class='c-ev'><b>{name}</b><small>{_fmt_start(s.get('start_time'))} UTC</small>"
-        f"{_countdown(s.get('start_time'))}{badge}{res}</td>"
+        f"{_countdown(s.get('start_time'), s.get('fixture_id'))}{_live_badge(s.get('fixture_id'))}{badge}{res}</td>"
         f"<td class='c-out'>{outcome}<div class='tags'>{''.join(tags)}</div></td>"
         f"<td class='c-move'><span class='old'>{bet['old_price']:.2f}</span>"
         f"<span class='arr'>→</span><span class='new'>{bet['new_price']:.2f}</span>"
@@ -493,7 +533,7 @@ def _active_signals(rows) -> str:
             f"<tr class='row'><td class='c-stars'>{'★' * (r['stars'] or 0)}</td>"
             f"<td class='c-ev'><b>{html.escape(event)}</b>"
             f"<small>старт {_fmt_start(r['start_time'])} UTC</small>"
-            f"{_countdown(r['start_time'])}</td>"
+            f"{_countdown(r['start_time'], r['fixture_id'])}{_live_badge(r['fixture_id'])}</td>"
             f"<td class='c-out'>{html.escape(r['outcome_name'] or '')}</td>"
             f"<td class='c-move'><span class='old'>{old_p}</span><span class='arr'>→</span>"
             f"<span class='new'>{new_p}</span></td>"
@@ -584,7 +624,8 @@ def _mini_signals(rows, strategy: str = "aggressive") -> str:
         items.append(
             f"<li><span class='ms-ev'><b>{html.escape(event)}</b>"
             f"<small>{html.escape(pick)} · {old_p} → {new_p} · "
-            f"взяли <b>{entry}</b></small>{_countdown(r['start_time'])}</span>{st}</li>"
+            f"взяли <b>{entry}</b></small>{_countdown(r['start_time'], r['fixture_id'])}"
+            f"{_live_badge(r['fixture_id'])}</span>{st}</li>"
         )
     return "<ul class='mini'>" + "".join(items) + "</ul>"
 
@@ -933,6 +974,7 @@ tbody tr:hover td,table tr.row:hover td{background:rgba(255,255,255,.022)}
 .cd-to{display:inline-block;margin-top:4px;font-size:11px;font-weight:700;font-family:var(--mono);padding:2px 7px;border-radius:6px;background:rgba(74,217,255,.1);color:var(--cy);white-space:nowrap}
 .cd-to.soon{background:rgba(255,197,49,.13);color:var(--warn)}
 .cd-to.live{background:rgba(255,61,129,.13);color:var(--mag)}
+.cd-to.done{background:rgba(255,255,255,.05);color:var(--ink3)}
 .c-out{font-weight:600}
 .tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px}
 .tag{font-size:9.5px;font-weight:800;letter-spacing:.09em;padding:3px 7px;border-radius:6px;
@@ -955,6 +997,8 @@ tbody tr:hover td,table tr.row:hover td{background:rgba(255,255,255,.022)}
 .c-ev .chip.win{background:rgba(60,220,130,.13);color:var(--good);border:1px solid rgba(60,220,130,.32)}
 .c-ev .chip.lose{background:rgba(255,61,129,.12);color:var(--bad);border:1px solid rgba(255,61,129,.3)}
 .c-ev .chip.na{background:rgba(255,255,255,.05);color:var(--ink3);border:1px solid var(--line)}
+.score{display:inline-block;margin-left:8px;padding:2px 9px;border-radius:999px;font-family:var(--mono);font-size:13px;font-weight:800;color:#0b0b06;background:var(--mag);letter-spacing:.02em}
+.score.done{background:rgba(255,255,255,.08);color:var(--ink2)}
 .c-bet .price.est{color:var(--cy)}
 .mono{font-family:var(--mono);font-size:15px;font-weight:700;color:var(--cy)}
 .hit{color:var(--good);font-weight:600}
@@ -1408,6 +1452,9 @@ def render_dashboard(summaries: list, quota: dict = None):
 
     span = cov.get("span_hours") or 24
     span_label = f"{span} {_hours_word(span)}"
+
+    _LIVE.clear()
+    _LIVE.update(storage.live_scores_map())
 
     _write_ledger(aggressive)
 

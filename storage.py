@@ -147,6 +147,20 @@ CREATE TABLE IF NOT EXISTS funnel_log (
 );
 CREATE INDEX IF NOT EXISTS idx_funnel_at ON funnel_log (at);
 
+-- Live score for a match that has already kicked off. Kept in its own table
+-- rather than as columns on tracked_alerts because one fixture can carry a
+-- signal AND a movement row, and both want the same score.
+CREATE TABLE IF NOT EXISTS live_scores (
+    fixture_id TEXT PRIMARY KEY,
+    sport_key TEXT,
+    home_team TEXT,
+    away_team TEXT,
+    home_score REAL,
+    away_score REAL,
+    completed INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -801,6 +815,59 @@ def recent_bets(limit: int = 5, kind: str = "prematch", strategy: str = None):
             f"FROM tracked_alerts WHERE kind=?{sf} "
             "ORDER BY detected_at DESC LIMIT ?",
             (kind,) + sp + (limit,),
+        ).fetchall()
+
+
+def save_live_score(fixture_id, sport_key, home_team, away_team,
+                    home_score, away_score, completed, at):
+    with _conn() as conn:
+        conn.execute(
+            "INSERT INTO live_scores (fixture_id, sport_key, home_team, away_team,"
+            " home_score, away_score, completed, updated_at) VALUES (?,?,?,?,?,?,?,?)"
+            " ON CONFLICT(fixture_id) DO UPDATE SET home_score=excluded.home_score,"
+            " away_score=excluded.away_score, completed=excluded.completed,"
+            " updated_at=excluded.updated_at",
+            (fixture_id, sport_key, home_team, away_team,
+             home_score, away_score, 1 if completed else 0, at),
+        )
+        conn.commit()
+
+
+def live_scores_map(max_age_minutes: int = 90) -> dict:
+    """{fixture_id: row} for matches currently in play.
+
+    Age-limited on purpose: a score we last refreshed two hours ago is not a
+    live score, it is a stale one, and printing it next to "матч идёт" would
+    be worse than printing nothing.
+    """
+    since = (datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)).isoformat()
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT fixture_id, home_score, away_score, completed, updated_at "
+            "FROM live_scores WHERE updated_at>=?", (since,),
+        ).fetchall()
+    return {r["fixture_id"]: r for r in rows}
+
+
+def inplay_fixtures(now_iso: str, limit: int = 60):
+    """Events we are standing on whose match has started but not been graded.
+
+    Union of the two tables that hold them: a signal we bet, and a movement we
+    only logged. Both appear on the site with a "матч идёт" badge, so both need
+    a score to put next to it.
+    """
+    with _conn() as conn:
+        return conn.execute(
+            """
+            SELECT fixture_id, sport_key, home_team, away_team FROM (
+                SELECT fixture_id, sport_key, home_team, away_team, start_time
+                  FROM tracked_alerts WHERE resolved=0 AND start_time IS NOT NULL
+                UNION
+                SELECT fixture_id, sport_key, home_team, away_team, start_time
+                  FROM movements WHERE resolved=0 AND start_time IS NOT NULL
+            ) WHERE start_time <= ? ORDER BY start_time DESC LIMIT ?
+            """,
+            (now_iso, limit),
         ).fetchall()
 
 

@@ -23,6 +23,7 @@ from config import (
     RESULT_CHECK_DELAY_HOURS,
     RESULTS_CHECK_INTERVAL_HOURS,
     ODDSPAPI_SPORT_KEYS,
+    LIVE_SCORE_MAX_SPORTS,
 )
 import odds_client
 import storage
@@ -156,6 +157,50 @@ def check_pending_results(now: datetime = None) -> int:
 
     resolved_count += _resolve_movements(scores_by_fixture, now)
     return resolved_count
+
+
+def refresh_live_scores(now: datetime = None) -> int:
+    """Pull the current score for every match we are standing on that has
+    already kicked off.
+
+    Requested 2026-08-01: "если у нас матч идет, то пиши актуальный счет".
+
+    Budget-aware, because scores cost credits like everything else. It only
+    asks about sports that actually have an in-play position, and never more
+    than LIVE_SCORE_MAX_SPORTS of them per cycle -- so on a quiet night it
+    spends nothing at all, and on a busy one a couple of credits rather than
+    sweeping the whole card.
+    """
+    now = now or datetime.now(timezone.utc)
+    rows = storage.inplay_fixtures(now.isoformat())
+    if not rows:
+        return 0
+
+    wanted = {}
+    for r in rows:
+        if r["sport_key"] and r["sport_key"] not in ODDSPAPI_SPORT_KEYS:
+            wanted.setdefault(r["sport_key"], []).append(r)
+    if not wanted:
+        return 0
+
+    # Most positions first: if the cap bites, spend the credits where the most
+    # of the page is waiting on an answer.
+    sports = sorted(wanted, key=lambda k: -len(wanted[k]))[:LIVE_SCORE_MAX_SPORTS]
+
+    saved, at = 0, now.isoformat()
+    for sport_key in sports:
+        # daysFrom=1 is the cheapest form of this call (1 credit) and already
+        # covers everything currently running.
+        for ev in odds_client.fetch_scores_for_sport(sport_key, days_from=1,
+                                                     on_error=_warn_sport_error):
+            home, away = ev.get("home_team"), ev.get("away_team")
+            hs, as_ = _extract_scores(ev, home, away)
+            if hs is None or as_ is None:
+                continue  # listed but not started -- nothing to show yet
+            storage.save_live_score(ev.get("id"), sport_key, home, away,
+                                    hs, as_, ev.get("completed"), at)
+            saved += 1
+    return saved
 
 
 def _resolve_movements(scores_by_fixture, now):

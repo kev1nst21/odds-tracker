@@ -117,13 +117,23 @@ def run_once():
     # pre-drop coefficient, this is the ceiling the strategy is worth when
     # execution is free -- the benchmark the real, bettable numbers are
     # measured against.
-    moves_logged = sum(1 for s in summaries if storage.save_movement(s, fetched_at))
+    moves_logged = 0
+    for s in summaries:
+        # Same "is this the first time we've seen it" flag as the alerts use,
+        # so the bot can announce a move once and then stay quiet about it
+        # even though an hour-long baseline keeps it visible for many cycles.
+        s["move_is_new"] = storage.save_movement(s, fetched_at)
+        moves_logged += 1 if s["move_is_new"] else 0
 
     notifier.notify_summaries(summaries, dashboard_url=DASHBOARD_URL)
 
     # Costs quota (one scores call per sport with pending alerts), so this is
     # internally throttled to run at most once every RESULTS_CHECK_INTERVAL_HOURS.
     newly_resolved = results.check_pending_results()
+
+    # Current score for anything we're standing on that has already kicked
+    # off. Free when nothing is in play -- it asks about no sports at all.
+    live = results.refresh_live_scores(now)
 
     # Drop price history we no longer need. At a 3-minute cadence the snapshot
     # table grows by millions of rows a day; left alone it would eventually make
@@ -155,6 +165,7 @@ def run_once():
         f"{len(records)} lines total, {len(summaries)} events moved {SPIKE_THRESHOLD_PCT*100:.0f}%+, "
         f"{actionable} with an open entry ({optimal} optimal), {starred} at 3 stars, "
         f"{logged} new bets logged, {moves_logged} moves logged, {newly_resolved} resolved, "
+        f"{live} live scores, "
         f"{pruned} old rows pruned, dashboard -> {path}"
     )
     return summaries

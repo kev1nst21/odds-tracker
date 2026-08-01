@@ -84,3 +84,27 @@ print("evidence ok: a single bookmaker moving is recorded but never alerted")
 assert storage.save_movement(solo[0], now.isoformat()), "solo move never reached movements"
 assert storage.movement_stats()["total"] == 1, storage.movement_stats()
 print("movements ok: a move we would not bet is still logged and shown")
+
+# --- the bot must announce moves it is NOT betting -------------------------
+# Requested 2026-08-01: "эти движения тоже мы должны озвучивать, хоть и не
+# поставили, может кто-то поставит."
+import notifier  # noqa: E402
+
+sent = []
+notifier.send_telegram_message = lambda text, **k: sent.append(text)
+
+solo[0]["move_is_new"] = True
+notifier.notify_summaries(solo, dashboard_url="https://example.test")
+assert sent, "a move with no bet produced no message at all"
+msg = sent[-1]
+assert "Движения без ставки" in msg, msg[:300]
+assert "двинулась одна контора" in msg, msg[:400]
+assert "Riga II" in msg and "2.90" in msg, msg[:400]
+print("notify ok: a move we did not bet is still announced, with the reason")
+
+# a move already announced once must not be repeated on the next cycle
+sent.clear()
+solo[0]["move_is_new"] = False
+notifier.notify_summaries(solo, dashboard_url="https://example.test")
+assert not sent, "the same move was announced twice"
+print("notify ok: announced once, then silent")

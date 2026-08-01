@@ -148,7 +148,17 @@ def notify_summaries(summaries: list, max_events: int = 6, dashboard_url: str = 
     # so the same event stays actionable for many cycles in a row.
     actionable = [s for s in summaries
                   if s.get("alertable") and s.get("is_new", True)]
-    if not actionable:
+
+    # Moves we are NOT betting -- the old price is gone, or only one book
+    # shifted. Requested 2026-08-01: "эти движения тоже мы должны озвучивать,
+    # хоть и не поставили, может кто-то поставит." Someone with an account we
+    # don't cover may still get on, and staying silent about a move we saw is
+    # hiding information rather than protecting anyone. They go in a separate
+    # block, once each, clearly marked as not-a-bet.
+    seen_only = [s for s in summaries
+                 if s.get("move_is_new", False) and s not in actionable]
+
+    if not actionable and not seen_only:
         return
 
     strong = sum(1 for s in actionable if s.get("stars", 0) >= 3)
@@ -160,12 +170,50 @@ def notify_summaries(summaries: list, max_events: int = 6, dashboard_url: str = 
         header += f"\n🟢 из них оптимальных (коэф. ≤ {OPTIMAL_MAX_PRICE:g}): <b>{opt}</b>"
 
     body = "\n\n➖➖➖\n\n".join(_format_event(s) for s in actionable[:max_events])
+    if not actionable:
+        header, body = "👀 <b>Движения без ставки</b>", ""
 
     footer = ""
     if len(actionable) > max_events:
         footer += f"\n\n<i>...и ещё {len(actionable) - max_events} на сайте.</i>"
+    if seen_only:
+        footer += _format_seen_only(seen_only, max_events)
     if dashboard_url:
         footer += f"\n\n🌐 {dashboard_url}"
     footer += f"\n\n{DISCLAIMER}"
 
-    send_telegram_message(f"{header}\n\n{body}{footer}")
+    send_telegram_message(f"{header}\n\n{body}{footer}".replace("\n\n\n", "\n\n"))
+
+
+def _format_seen_only(moves: list, limit: int) -> str:
+    """Compact list of moves we spotted but did not bet.
+
+    Deliberately terse and deliberately honest about WHY each one is not a
+    signal -- a line here that looked like a recommendation would be the
+    worst possible outcome, since the price it quotes is usually already gone.
+    """
+    lines = []
+    for s in sorted(moves, key=lambda x: -abs((x.get("bet") or {}).get("drop_pct") or 0))[:limit]:
+        bet = s.get("bet") or {}
+        who = html.escape(bet.get("name") or "")
+        home = html.escape(s.get("home_team") or "?")
+        away = html.escape(s.get("away_team") or "?")
+        if not s.get("well_evidenced", True):
+            why = "двинулась одна контора"
+        elif not s.get("has_entry"):
+            why = "старую цену уже нигде не дают"
+        else:
+            why = "вход не дотянул по цене"
+        lines.append(
+            f"• <b>{home} — {away}</b> · {who} "
+            f"{bet.get('old_price', 0):.2f}→{bet.get('new_price', 0):.2f} "
+            f"(−{abs(bet.get('drop_pct') or 0):.0f}%, {bet.get('down_count', 0)}"
+            f"/{bet.get('books_count', 0)} контор) — <i>{why}</i>"
+        )
+    extra = ""
+    if len(moves) > limit:
+        extra = f"\n<i>...и ещё {len(moves) - limit} на сайте.</i>"
+    return ("\n\n👀 <b>Движения без ставки</b>\n"
+            "<i>Мы сюда не заходим — но деньги там были. Если у тебя есть контора,"
+            " которая ещё не подвинулась, смотри сам.</i>\n"
+            + "\n".join(lines) + extra)
