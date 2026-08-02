@@ -74,14 +74,22 @@ jobs:
       #        "был 3.20, ставим за 1.87" through, and publishing a win rate
       #        measured on a bug we had already removed would be worse than
       #        starting over with nine signals lost.
+      #   -v4- (2026-08-01) full restart, asked for explicitly. What counts as
+      #        a signal changed on every axis in one day: the threshold went
+      #        10 -> 8 -> 10, breadth stopped meaning "how many books quote"
+      #        and started meaning "how many books moved", the price band
+      #        narrowed to 1.55-5.50, and a move is now measured over an hour
+      #        instead of over one poll. Rows logged under any of those rules
+      #        cannot be compared with rows logged under these, so the record
+      #        starts clean rather than mixing five definitions in one table.
       # Schema changes do NOT justify a bump -- new columns arrive through
       # storage._migrate(). Only a change to what counts as a signal does.
       - name: Restore odds history DB
         uses: actions/cache@v4
         with:
           path: data
-          key: odds-history-v3-${{ github.run_id }}
-          restore-keys: odds-history-v3-
+          key: odds-history-v4-${{ github.run_id }}
+          restore-keys: odds-history-v4-
 
       - run: pip install -r requirements.txt
 
@@ -107,7 +115,7 @@ jobs:
           # Keep in sync with config.py's default -- an env var here silently
           # overrides it, and a stale value once left the dashboard telling
           # users one threshold while the code alerted on another.
-          SPIKE_THRESHOLD_PCT: "0.08"
+          SPIKE_THRESHOLD_PCT: "0.10"
           RESULTS_CHECK_INTERVAL_HOURS: "3"
           # Deliberately NOT setting POLL_INTERVAL_MINUTES: setting it here
           # would override cadence.json and reintroduce exactly the drift
