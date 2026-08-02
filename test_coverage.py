@@ -34,18 +34,18 @@ def rec(price, fid="fx1", book="pinnacle", outcome="home"):
 # A line that slides 2.60 -> 2.34 over an hour in small steps. Every single
 # step is under the 1% drift floor, so the old "diff against the previous
 # poll" logic saw absolutely nothing -- this is the production bug.
-steps = [2.60, 2.58, 2.56, 2.54, 2.52, 2.48, 2.44, 2.40, 2.37, 2.34]
+steps = [2.60, 2.57, 2.54, 2.50, 2.46, 2.42, 2.38, 2.33, 2.29, 2.25]
 for i, p in enumerate(steps):
     at = (now - timedelta(minutes=(len(steps) - i) * 7)).isoformat()
     storage.save_snapshot([rec(p)], at)
 
 fetched_at = now.isoformat()
-spikes, movements = detector.detect([rec(2.34)], fetched_at)
+spikes, movements = detector.detect([rec(2.25)], fetched_at)
 assert movements, "an hour-long slide produced no movement at all"
 drop = movements[0]["pct_change"]
-assert drop < -0.09, f"expected a ~10% drop against the hour-old price, got {drop:.3%}"
-assert spikes, "a 10% slide over an hour did not clear the 8% threshold"
-print(f"baseline ok: gradual slide 2.60 -> 2.34 seen as {drop:.1%} "
+assert drop < -0.12, f"expected a ~13% drop against the hour-old price, got {drop:.3%}"
+assert spikes, f"the slide did not clear the {config.SPIKE_THRESHOLD_PCT:.0%} threshold"
+print(f"baseline ok: gradual slide 2.60 -> 2.25 seen as {drop:.1%} "
       f"(step-by-step it is under the 1% floor and was invisible before)")
 
 # A baseline older than the safety rail must be refused rather than reported

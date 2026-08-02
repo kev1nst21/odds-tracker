@@ -760,7 +760,7 @@ def alert_stats(kind: str = "prematch", strategy: str = "aggressive"):
             f"FROM tracked_alerts WHERE kind=? AND clv_pct IS NOT NULL{sf}{checkable}"
         )
         recent = conn.execute(
-            "SELECT fixture_id, home_team, away_team, outcome_name, stars, "
+            "SELECT fixture_id, sport_key, home_team, away_team, outcome_name, stars, "
             f"       old_price, new_price, {price_col} AS entry_price, entry_book, "
             f"       {res_col} AS result, clv_pct, clv_continued, resolved_at "
             f"FROM tracked_alerts WHERE kind=? AND resolved=1{sf}{checkable} "
@@ -817,7 +817,7 @@ def recent_bets(limit: int = 5, kind: str = "prematch", strategy: str = None,
     sf, sp = _strategy_clause(strategy)
     with _conn() as conn:
         return conn.execute(
-            "SELECT fixture_id, home_team, away_team, outcome_name, stars, "
+            "SELECT fixture_id, sport_key, home_team, away_team, outcome_name, stars, "
             "       down_count, books_count, old_price, new_price, "
             "       entry_price, entry_book, start_time, detected_at, "
             "       resolved, result, clv_pct, resolved_at, "
@@ -856,6 +856,22 @@ def live_scores_map(max_age_minutes: int = 90) -> dict:
         rows = conn.execute(
             "SELECT fixture_id, home_score, away_score, completed, updated_at "
             "FROM live_scores WHERE updated_at>=?", (since,),
+        ).fetchall()
+    return {r["fixture_id"]: r for r in rows}
+
+
+def final_scores_map(limit: int = 400) -> dict:
+    """{fixture_id: row} for matches that have finished.
+
+    Unlike live_scores_map this has no age limit: a final score does not go
+    stale, and the track record needs to show what a match ended, however long
+    ago it was played.
+    """
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT fixture_id, home_score, away_score, completed, updated_at "
+            "FROM live_scores WHERE completed=1 ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
         ).fetchall()
     return {r["fixture_id"]: r for r in rows}
 

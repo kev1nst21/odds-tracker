@@ -117,6 +117,10 @@ def _ago(value, now=None) -> str:
 # the same map, and it is read-only for the duration of a render.
 _LIVE = {}
 
+# Final scores of finished matches. Separate from _LIVE because a final
+# score never goes stale, while a live one does.
+_FINAL = {}
+
 
 def _live_badge(fixture_id, live=None) -> str:
     """Score of a match in progress.
@@ -242,6 +246,7 @@ def _movements_table(rows) -> str:
         items.append(
             f"<tr class='row'><td class='c-stars'>{'★' * (r['stars'] or 0)}</td>"
             f"<td class='c-ev'><b>{html.escape(event)}</b>"
+            f"{_sport_badge(r['sport_key'])}"
             f"<small>{_fmt_start(r['start_time'])} UTC</small></td>"
             f"<td class='c-out'>{html.escape(r['outcome_name'] or '')}"
             f"<div class='tags'>{mark}</div></td>"
@@ -352,7 +357,8 @@ def _event_row(s: dict) -> str:
         f"<tr class='row' data-stars='{stars}' data-open='{1 if has_entry else 0}' "
         f"data-strat='{strategy}' data-fresh='{1 if s.get('fresh') else 0}'>"
         f"<td class='c-stars'>{'★' * stars}<span class='sr'>{stars} из 3</span></td>"
-        f"<td class='c-ev'><b>{name}</b><small>{_fmt_start(s.get('start_time'))} UTC</small>"
+        f"<td class='c-ev'><b>{name}</b>{_sport_badge(s.get('sport_key'))}"
+        f"<small>{_fmt_start(s.get('start_time'))} UTC</small>"
         f"{_countdown(s.get('start_time'), s.get('fixture_id'))}{_live_badge(s.get('fixture_id'))}{badge}{res}</td>"
         f"<td class='c-out'>{outcome}<div class='tags'>{''.join(tags)}</div></td>"
         f"<td class='c-move'><span class='old'>{bet['old_price']:.2f}</span>"
@@ -383,6 +389,7 @@ def _row_to_summary(r) -> dict:
         }
     return {
         "fixture_id": r["fixture_id"],
+        "sport_key": r["sport_key"],
         "home_team": r["home_team"],
         "away_team": r["away_team"],
         "start_time": r["start_time"],
@@ -532,6 +539,7 @@ def _active_signals(rows) -> str:
         items.append(
             f"<tr class='row'><td class='c-stars'>{'★' * (r['stars'] or 0)}</td>"
             f"<td class='c-ev'><b>{html.escape(event)}</b>"
+            f"{_sport_badge(r['sport_key'])}"
             f"<small>старт {_fmt_start(r['start_time'])} UTC</small>"
             f"{_countdown(r['start_time'], r['fixture_id'])}{_live_badge(r['fixture_id'])}</td>"
             f"<td class='c-out'>{html.escape(r['outcome_name'] or '')}</td>"
@@ -704,7 +712,9 @@ def _strategy_card(stats: dict, title: str, subtitle: str, cls: str, recent=None
         <div class="stat"><button class="stat-btn" type="button" data-open="sig-{cls}"
              aria-expanded="false" aria-controls="sig-{cls}"
              title="Показать последние сигналы">{stats['total']}</button><span>сигналов ▾</span></div>
-        <div class="stat"><b>{stats['resolved']}</b><span>проверено</span></div>
+        <div class="stat"><button class="stat-btn" type="button" data-open="res-{cls}"
+             aria-expanded="false" aria-controls="res-{cls}"
+             title="Показать сыгравшие">{stats['resolved']}</button><span>проверено ▾</span></div>
         <div class="stat"><b>{stats['pending']}</b><span>ждут матча</span></div>
         <div class="stat"><b>{win_rate_html}</b><span>заходимость</span></div>
         <div class="stat"><b>{avg_clv_html}</b><span>средний CLV</span></div>
@@ -714,9 +724,41 @@ def _strategy_card(stats: dict, title: str, subtitle: str, cls: str, recent=None
         <div class="sig-cap">Последние сигналы этой стратегии</div>
         {_mini_signals(recent, stats.get('strategy'))}
       </div>
+      <div class="sig-list" id="res-{cls}" hidden>
+        <div class="sig-cap">Последние сыгравшие — по этой стратегии</div>
+        {_mini_resolved(stats)}
+      </div>
       {_bankroll_block(stats)}
     </div>
     """
+
+
+def _mini_resolved(stats: dict, limit: int = 10) -> str:
+    """The last finished bets for ONE strategy, opened from its "проверено".
+
+    Deliberately settled with that strategy's own columns (alert_stats already
+    selects them), so the optimal card shows the optimal verdict and price --
+    not the straight bet's.
+    """
+    rows = (stats.get("recent") or [])[:limit]
+    if not rows:
+        return "<p class='none'>По этой стратегии сыгравших ставок пока нет.</p>"
+    items = []
+    for r in rows:
+        home, away = r["home_team"], r["away_team"]
+        event = f"{home} — {away}" if home and away else str(r["fixture_id"])
+        price = f"{r['entry_price']:.2f}" if r["entry_price"] else "—"
+        score = _score_text(r["fixture_id"])
+        score_html = f" · <b>{score}</b>" if score else ""
+        cls, label = _RESULT_LABEL.get(r["result"], ("pending", "⏳ ждём"))
+        clv = (f" · CLV {r['clv_pct'] * 100:+.1f}%") if r["clv_pct"] is not None else ""
+        items.append(
+            f"<li><span class='ms-ev'><b>{html.escape(event)}</b>"
+            f"{_sport_badge(r['sport_key'])}"
+            f"<small>{html.escape(r['outcome_name'] or '')} @ {price}{score_html}{clv}</small>"
+            f"</span><span class='{cls}'>{label}</span></li>"
+        )
+    return "<ul class='mini'>" + "".join(items) + "</ul>"
 
 
 def _resolved_table(stats: dict) -> str:
@@ -821,30 +863,93 @@ def _opt_detail_row(b) -> str:
     return (f"<tr><td>Оптимальная ставила</td><td>{html.escape(pick)}{tail}</td></tr>")
 
 
-def _last_bets(bets, limit: int = 6) -> str:
+# Which sport a fixture belongs to, in words. Requested 2026-08-01: a row
+# reading "Boostgate eSports — Su eSports" tells you nothing about whether you
+# are looking at Dota, CS or football, and the discipline changes how you read
+# the price entirely.
+_SPORT_NAMES = {
+    "esports_cs2": "CS2",
+    "esports_dota2": "Dota 2",
+    "esports_lol": "LoL",
+    "table_tennis": "Наст. теннис",
+}
+_SPORT_PREFIXES = (
+    ("soccer_", "Футбол"),
+    ("tennis_", "Теннис"),
+    ("basketball_", "Баскетбол"),
+    ("icehockey_", "Хоккей"),
+    ("baseball_", "Бейсбол"),
+    ("americanfootball_", "Ам. футбол"),
+    ("mma_", "MMA"),
+    ("boxing", "Бокс"),
+    ("cricket_", "Крикет"),
+    ("rugby", "Регби"),
+    ("golf_", "Гольф"),
+    ("aussierules_", "Австр. футбол"),
+    ("esports_", "Киберспорт"),
+)
+
+
+def _sport_label(sport_key) -> str:
+    key = (sport_key or "").lower()
+    if not key:
+        return ""
+    if key in _SPORT_NAMES:
+        return _SPORT_NAMES[key]
+    for prefix, name in _SPORT_PREFIXES:
+        if key.startswith(prefix):
+            return name
+    return key.split("_")[0].capitalize()
+
+
+def _sport_badge(sport_key) -> str:
+    label = _sport_label(sport_key)
+    if not label:
+        return ""
+    cls = "sport esp" if (sport_key or "").startswith("esports_") else "sport"
+    return f"<span class='{cls}'>{html.escape(label)}</span>"
+
+
+def _score_text(fixture_id) -> str:
+    """Final score of a match that is over, as plain text."""
+    row = _FINAL.get(fixture_id)
+    if not row or row["home_score"] is None or row["away_score"] is None:
+        return ""
+    fmt = lambda v: f"{v:.0f}" if float(v).is_integer() else f"{v:g}"  # noqa: E731
+    return f"{fmt(row['home_score'])}:{fmt(row['away_score'])}"
+
+
+def _last_bets(bets, limit: int = 10) -> str:
+    """The track record: one card per finished bet, openable for the detail.
+
+    Merged 2026-08-01 from two blocks that showed the same rows twice -- a
+    compact table and a detail list. One row, closed by default, carrying
+    everything you need to judge it at a glance: who, what we backed and at
+    what price, how the match ended, and how EACH strategy settled. The rest
+    opens on click.
+    """
     if not bets:
-        return "<p class='empty small'>Ставок пока нет — появятся с первым сигналом.</p>"
+        return ("<p class='empty small'>Сыгравших ставок пока нет — первая строка "
+                "появится, когда закончится матч с сигналом. Промахи показываем "
+                "наравне с заходами: журнал без промахов не стоит ничего.</p>")
     items = []
     for b in bets[:limit]:
         home, away = b["home_team"], b["away_team"]
         event = f"{home} — {away}" if home and away else str(b["fixture_id"])
         stars = "★" * (b["stars"] or 0)
         entry = f"{b['entry_price']:.2f}" if b["entry_price"] else "—"
-        if b["resolved"]:
-            # BOTH verdicts, always. "❌ не зашла" alone was actively
-            # misleading on Cocciaretto — Osaka: the straight bet lost and the
-            # set handicap won, and the row showed only the loss. The two
-            # lines place different bets, so they get two answers.
-            status = _both_results(b)
-        else:
-            status = "<span class='pending'>⏳ ждём матч</span>"
+        score = _score_text(b["fixture_id"])
+        score_html = f"<span class='b-score'>{score}</span>" if score else ""
+        status = _both_results(b)
         clv = f"{b['clv_pct'] * 100:+.1f}%" if b["clv_pct"] is not None else "—"
         old_p = f"{b['old_price']:.2f}" if b["old_price"] else "—"
         new_p = f"{b['new_price']:.2f}" if b["new_price"] else "—"
+        score_row = (f"<tr><td>Счёт матча</td><td class='mono'><b>{score}</b></td></tr>"
+                     if score else "")
         items.append(
             "<details class='bet'><summary>"
             f"<span class='b-left'><span class='c-stars'>{stars}</span>"
-            f"<span class='b-name'>{html.escape(event)}</span>"
+            f"<span class='b-name'>{html.escape(event)}{_sport_badge(b['sport_key'])}{score_html}</span>"
             f"<span class='b-pick'>{html.escape(b['outcome_name'] or '')} @ {entry}</span></span>"
             f"{status}</summary>"
             "<div class='b-body'><table>"
@@ -853,12 +958,13 @@ def _last_bets(bets, limit: int = 6) -> str:
             f"<tr><td>Просел до</td><td class='mono'>{new_p}</td></tr>"
             f"<tr><td>Поставили по</td><td class='mono'><b>{entry}</b> — "
             f"{html.escape(b['entry_book'] or '')}</td></tr>"
+            f"{_opt_detail_row(b)}"
+            f"{score_row}"
             f"<tr><td>Просело у контор</td><td class='mono'>{b['down_count'] or 0} "
             f"из {b['books_count'] or 0}</td></tr>"
             f"<tr><td>Старт матча</td><td class='mono'>{_fmt_dt(b['start_time'])}</td></tr>"
             f"<tr><td>Сигнал зафиксирован</td><td class='mono'>{_fmt_dt(b['detected_at'])}</td></tr>"
             f"<tr><td>Результат</td><td>{status}</td></tr>"
-            f"{_opt_detail_row(b)}"
             f"<tr><td>CLV</td><td class='mono'>{clv}</td></tr>"
             "</table></div></details>"
         )
@@ -1068,6 +1174,9 @@ tbody tr:hover td,table tr.row:hover td{background:rgba(255,255,255,.022)}
 .cd-to.live{background:rgba(255,61,129,.13);color:var(--mag)}
 .cd-to.done{background:rgba(255,255,255,.05);color:var(--ink3)}
 .verdicts{display:flex;flex-direction:column;gap:3px;align-items:flex-end;font-size:12.5px;white-space:nowrap}
+.sport{display:inline-block;margin-left:8px;padding:1px 7px;border-radius:5px;background:rgba(74,217,255,.12);color:var(--cy);font-size:10.5px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;vertical-align:middle}
+.sport.esp{background:rgba(255,61,129,.13);color:var(--mag)}
+.b-score{margin-left:9px;padding:1px 8px;border-radius:999px;background:rgba(255,255,255,.07);color:var(--ink);font-family:var(--mono);font-size:12.5px;font-weight:800}
 .c-out{font-weight:600}
 .tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px}
 .tag{font-size:9.5px;font-weight:800;letter-spacing:.09em;padding:3px 7px;border-radius:6px;
@@ -1327,10 +1436,9 @@ $ticker
     $stats_optimal
   </div>
 
-  <h3 style="font-family:Unbounded,sans-serif;font-size:15px;margin:26px 0 8px;text-transform:uppercase">Сыгравшие сигналы</h3>
-  $resolved_table
-
-  <h3 style="font-family:Unbounded,sans-serif;font-size:15px;margin:26px 0 8px;text-transform:uppercase">Разбор каждой ставки — $last_n сыгравших</h3>
+  <h3 style="font-family:Unbounded,sans-serif;font-size:15px;margin:26px 0 8px;text-transform:uppercase">Сыгравшие сигналы — $last_n</h3>
+  <p class="lead small">Нажми на строку, чтобы раскрыть: обе цены, что ставила оптимальная,
+  счёт матча и CLV.</p>
   $last_bets
 
   <div class="honest">
@@ -1554,6 +1662,8 @@ def render_dashboard(summaries: list, quota: dict = None):
 
     _LIVE.clear()
     _LIVE.update(storage.live_scores_map())
+    _FINAL.clear()
+    _FINAL.update(storage.final_scores_map())
 
     _write_ledger(aggressive)
 
@@ -1607,7 +1717,6 @@ def render_dashboard(summaries: list, quota: dict = None):
             optimal, "Оптимальная",
             f"До {OPTIMAL_MAX_PRICE:g} — та же ставка. Выше — вход мягче: двойной шанс в футболе, фора там, где ничьей нет.", "opt",
             storage.recent_bets(5, "prematch", "optimal")),
-        resolved_table=_resolved_table(aggressive),
         movements_table=_movements_table(storage.recent_movements(30)),
         movement_stats=_movement_stats(storage.movement_stats()),
         active_signals=_active_signals(active),

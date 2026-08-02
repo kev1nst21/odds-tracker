@@ -53,7 +53,13 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 # learn anything from. 8% widens the top of the funnel without touching the
 # rules that decide whether an entry is real, which are the ones that actually
 # protect quality.
-SPIKE_THRESHOLD_PCT = float(os.getenv("SPIKE_THRESHOLD_PCT", "0.08"))
+# 2026-08-01, back to 0.10 by user decision, now that signals actually flow:
+# "поднимаем снова процент до 10 процентов минимум чтобы нас тригерило, меньше
+# вообще не рассматриваем". The 8% experiment did its job -- it widened the
+# top of the funnel while we were debugging why nothing came through. The real
+# blocker turned out to be the breadth rule, not the threshold, so the
+# threshold can go back to where a move is genuinely worth acting on.
+SPIKE_THRESHOLD_PCT = float(os.getenv("SPIKE_THRESHOLD_PCT", "0.10"))
 
 # How far back a price has to be compared against.
 #
@@ -227,7 +233,11 @@ EXCHANGE_BOOKMAKERS = ["betfair_ex_eu", "betfair_ex_uk", "betfair_ex_au", "match
 # outsider because it had "dropped" from 12.00 -- technically a move, but at
 # those odds the price swings on rounding and nobody is loading informed money
 # onto a 12-to-1 shot anyway.
-MAX_SIGNAL_PRICE = float(os.getenv("MAX_SIGNAL_PRICE", "8.0"))
+# 2026-08-01, tightened to 5.5 by user decision: "чтобы не было огромных и
+# супер маленьких кофов". Above this the price is a lottery ticket -- the
+# money that moves it is not necessarily informed, and one win in six flatters
+# the record without meaning anything.
+MAX_SIGNAL_PRICE = float(os.getenv("MAX_SIGNAL_PRICE", "5.5"))
 
 # A decimal price at or below this is not a real market -- 1.00 pays nothing
 # back, and anything under ~1.05 is a settled or suspended line rather than a
@@ -236,7 +246,10 @@ MAX_SIGNAL_PRICE = float(os.getenv("MAX_SIGNAL_PRICE", "8.0"))
 # bounds, the same event reported "просело у 8 из 4 контор" -- more books moving
 # than were quoting. Both modules now filter on this one constant so the two
 # counts can never disagree again.
-MIN_SIGNAL_PRICE = float(os.getenv("MIN_SIGNAL_PRICE", "1.05"))
+# 2026-08-01, raised from 1.05 to 1.55 by the same decision. Below this there
+# is nothing to win: a 10% drop on a 1.20 favourite moves it to 1.08, and no
+# amount of being right pays for the losses at that price.
+MIN_SIGNAL_PRICE = float(os.getenv("MIN_SIGNAL_PRICE", "1.55"))
 
 # Drop events that have already kicked off. The odds endpoint keeps returning
 # in-play matches, and their prices move on what is happening ON THE PITCH --

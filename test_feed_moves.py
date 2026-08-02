@@ -162,3 +162,51 @@ assert opt["profit"] <= 0, f"optimal bank paid an unbought handicap: {opt['profi
 assert opt["hits"] >= 1, "the handicap win vanished from the win rate too"
 print(f"bank ok: optimal win counted in заходимость ({opt['hits']} hit), "
       f"profit {opt['profit']:+.0f} — the 5.70 moneyline is no longer paid for a ~1.6 фора")
+
+# --- one merged track record, with the score --------------------------------
+# Requested 2026-08-01: "в сыгравших матчах ... счет давай указывать будем",
+# and "Сыгравшие сигналы и Разбор каждой ставки — эти блоки объедини в один".
+storage.save_live_score("f1", "tennis_atp", "Cocciaretto", "Osaka",
+                        1, 2, True, now.isoformat())
+dashboard._FINAL.clear()
+dashboard._FINAL.update(storage.final_scores_map())
+assert dashboard._score_text("f1") == "1:2", dashboard._score_text("f1")
+
+played = storage.recent_bets(10, "prematch", resolved_only=True)
+assert played, "no resolved bets to render"
+block = dashboard._last_bets(played, 10)
+assert "1:2" in block, "the final score is missing from the track record"
+assert "агрессивная" in block and "оптимальная" in block, "verdicts missing"
+print("track record ok: one block, final score 1:2 and both verdicts on the row")
+
+# "проверено" opens the last finished bets for that strategy
+opt = storage.alert_stats("prematch", "optimal")
+card = dashboard._strategy_card(opt, "ОПТИМАЛЬНАЯ", "sub", "opt",
+                                storage.recent_bets(5, "prematch", "optimal"))
+assert 'id="res-opt"' in card and 'data-open="res-opt"' in card, "проверено is not clickable"
+assert "Cocciaretto" in card, "the expanded list has no rows"
+assert "1:2" in card, "the expanded list has no score"
+print("card ok: «проверено» expands into the last finished bets, with scores")
+
+# the whole page still builds
+p2 = dashboard.render_dashboard([], quota={"remaining": 19978, "used": 22})
+page2 = open(p2, encoding="utf-8").read()
+assert "Сыгравшие сигналы" in page2 and "Разбор каждой ставки" not in page2, "blocks not merged"
+print(f"page ok: {len(page2)} bytes, single track-record block")
+
+# --- every row must name its discipline ------------------------------------
+# Requested 2026-08-01: "Boostgate eSports — Su eSports ... указывай что это за
+# дисциплина, например дота или контер страйк или лол".
+assert dashboard._sport_label("esports_dota2") == "Dota 2"
+assert dashboard._sport_label("esports_cs2") == "CS2"
+assert dashboard._sport_label("esports_lol") == "LoL"
+assert dashboard._sport_label("soccer_latvia_2") == "Футбол"
+assert dashboard._sport_label("tennis_atp_washington") == "Теннис"
+assert dashboard._sport_label("table_tennis") == "Наст. теннис"
+assert dashboard._sport_label("basketball_nba") == "Баскетбол"
+assert dashboard._sport_label(None) == ""
+esp = summary("f9", "Boostgate eSports", "Su eSports", "home", "Boostgate eSports",
+              2.90, 2.55, 2.88, "1xbet", 3, soon)
+esp["sport_key"] = "esports_dota2"
+assert "Dota 2" in dashboard._event_row(esp), "the discipline is missing from the feed row"
+print("discipline ok: Dota 2 / CS2 / LoL / Футбол / Теннис labelled on the row")

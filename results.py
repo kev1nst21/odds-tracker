@@ -142,6 +142,15 @@ def check_pending_results(now: datetime = None) -> int:
         winner = _winner_from_scores(home_score, away_score)
         side = row["outcome_id"]
 
+        # Keep the final score. Grading is the last moment we hold it -- once
+        # the bet is resolved we stop asking about that fixture, so if it is
+        # not stored here the site can only ever say "зашла" without saying
+        # what the match actually finished.
+        if home_score is not None and away_score is not None:
+            storage.save_live_score(row["fixture_id"], row["sport_key"],
+                                    row["home_team"], row["away_team"],
+                                    home_score, away_score, True, now.isoformat())
+
         # We only ever back the side money went into, so the bet wins exactly
         # when that side wins. A draw is never bet, so it always loses the bet.
         if winner is None or side not in _VALID_SIDES:
@@ -218,6 +227,10 @@ def _resolve_movements(scores_by_fixture, now):
         hs, as_ = _extract_scores(ev, row["home_team"], row["away_team"])
         winner = _winner_from_scores(hs, as_)
         side = row["outcome_id"]
+        if hs is not None and as_ is not None:
+            storage.save_live_score(row["fixture_id"], row["sport_key"],
+                                    row["home_team"], row["away_team"],
+                                    hs, as_, True, now.isoformat())
         if winner is None or side not in _VALID_SIDES:
             result = "n/a"
         else:
