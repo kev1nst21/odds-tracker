@@ -108,3 +108,26 @@ solo[0]["move_is_new"] = False
 notifier.notify_summaries(solo, dashboard_url="https://example.test")
 assert not sent, "the same move was announced twice"
 print("notify ok: announced once, then silent")
+
+# --- the suspicion flag ----------------------------------------------------
+# Requested 2026-08-01: "надо еще придумать как выслеживать договорняки".
+# Four patterns we already measure; three of them together get flagged.
+quiet = analytics._suspicion(
+    {"drop_pct": -22.0, "down_count": 4, "sharp_moved": True, "spiked": True},
+    "soccer_latvia_2")
+assert quiet[0] >= 3, quiet
+print(f"suspicion ok: quiet-league collapse scored {quiet[0]}/4 — {quiet[1]}")
+
+# the same move in a top league is NOT flagged: there it is news, not a fix
+major = analytics._suspicion(
+    {"drop_pct": -22.0, "down_count": 4, "sharp_moved": True, "spiked": False},
+    "soccer_uefa_champs_league")
+assert major[0] < 3, major
+print(f"suspicion ok: identical move in the Champions League scored {major[0]}/4 — not flagged")
+
+# an ordinary signal must never be flagged
+plain = analytics._suspicion(
+    {"drop_pct": -11.0, "down_count": 2, "sharp_moved": False, "spiked": False},
+    "soccer_epl")
+assert plain[0] == 0, plain
+print("suspicion ok: an ordinary 11% move at two books is not flagged")

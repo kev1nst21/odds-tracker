@@ -317,6 +317,12 @@ def _event_row(s: dict) -> str:
     # identical otherwise, so the badge is the only thing telling the reader
     # which one is fresh.
     badge = "<span class='chip fresh'>только что</span>" if s.get("fresh") else ""
+    # Flagged only at 3+ of the 4 patterns -- see analytics._suspicion. The
+    # title carries the actual reasons so it is a claim you can check, not a
+    # vibe.
+    if (s.get("suspicion") or 0) >= 3:
+        why = html.escape(", ".join(s.get("suspicion_reasons") or []))
+        badge += f"<span class='chip flag' title='{why}'>🚩 странное движение</span>"
     res = {"hit": "<span class='chip win'>зашла</span>",
            "miss": "<span class='chip lose'>не зашла</span>",
            "n/a": "<span class='chip na'>не проверить</span>"}.get(s.get("result") or "", "")
@@ -1198,6 +1204,7 @@ tbody tr:hover td,table tr.row:hover td{background:rgba(255,255,255,.022)}
 .c-ev .chip.fresh{background:rgba(200,255,46,.14);color:var(--lime);border:1px solid rgba(200,255,46,.35)}
 .c-ev .chip.win{background:rgba(60,220,130,.13);color:var(--good);border:1px solid rgba(60,220,130,.32)}
 .c-ev .chip.lose{background:rgba(255,61,129,.12);color:var(--bad);border:1px solid rgba(255,61,129,.3)}
+.c-ev .chip.flag{background:rgba(255,197,49,.15);color:var(--warn);border:1px solid rgba(255,197,49,.4)}
 .c-ev .chip.na{background:rgba(255,255,255,.05);color:var(--ink3);border:1px solid var(--line)}
 .score{display:inline-block;margin-left:8px;padding:2px 9px;border-radius:999px;font-family:var(--mono);font-size:13px;font-weight:800;color:#0b0b06;background:var(--mag);letter-spacing:.02em}
 .score.done{background:rgba(255,255,255,.08);color:var(--ink2)}

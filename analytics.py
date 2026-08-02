@@ -45,6 +45,7 @@ guarantee of anything -- sometimes the move is wrong, sometimes the lagging
 book simply hasn't been asked for that bet yet and will refuse or void it.
 Nothing here is advice, and none of it says how much to stake.
 """
+import os
 from collections import defaultdict
 
 from config import (
@@ -473,6 +474,60 @@ def _optimal_play(bet: dict, safe: dict):
 # visible fact is "0 сигналов", which is indistinguishable from a broken
 # pipeline -- and guessing which filter is too strict is how you end up
 # loosening the wrong one.
+# Leagues where a violent, broad line move is worth a second look. Deliberately
+# the INVERSE of the famous-league list: nobody fixes a Champions League tie,
+# and a big move there is news (an injury, a lineup leak) that the market
+# corrects in seconds. In a third division or a reserve fixture the same move
+# has no news behind it and the price stays moved.
+_WATCHED_TIERS = ("_2", "_3", "_reserve", "_youth", "u19", "u20", "u21",
+                  "_amateur", "_women", "friendl", "_challenger", "_itf",
+                  "_qualif", "esports_")
+_MAJOR_LEAGUES = ("_epl", "la_liga", "serie_a", "bundesliga", "ligue_one",
+                  "champs_league", "uefa_europa", "_atp_", "_wta_", "usa_mls")
+
+# A move has to be this big before the pattern is worth flagging at all. Well
+# above the alert threshold on purpose: 10% is "money arrived", this is "the
+# price stopped making sense".
+SUSPICION_DROP_PCT = float(os.getenv("SUSPICION_DROP_PCT", "15"))
+
+
+def _suspicion(bet, sport_key):
+    """How much this move looks like someone knowing the result.
+
+    There is no magic in this and it is not an accusation -- it is four things
+    we already measure, counted together, because each one alone is ordinary
+    and all four at once is not:
+
+      * the drop is violent, not just past the alert threshold;
+      * several independent bookmakers moved the same way, so it is not one
+        trader's typo;
+      * it happened in a quiet corner of the market -- a lower division, a
+        reserve side, a small esports fixture -- where there is no news flow to
+        explain it and no trading desk to correct it;
+      * the price kept falling across polls instead of settling.
+
+    Returns (score 0-4, list of reasons). Three or more is what the site
+    marks. Deliberately conservative: a false flag on a real team is worse
+    than a missed one.
+    """
+    if not bet:
+        return 0, []
+    key = (sport_key or "").lower()
+    drop = abs(bet.get("drop_pct") or 0)
+    reasons = []
+    if drop >= SUSPICION_DROP_PCT:
+        reasons.append(f"обвал на {drop:.0f}%")
+    if (bet.get("down_count") or 0) >= 3:
+        reasons.append(f"согласованно у {bet['down_count']} контор")
+    elif bet.get("sharp_moved"):
+        reasons.append("двинулась острая контора")
+    if any(t in key for t in _WATCHED_TIERS) and not any(m in key for m in _MAJOR_LEAGUES):
+        reasons.append("тихая лига — новостей там не бывает")
+    if bet.get("spiked"):
+        reasons.append("падало несколько срезов подряд")
+    return len(reasons), reasons
+
+
 LAST_FUNNEL = {}
 
 
@@ -678,8 +733,11 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
         # still recorded and still shown.
         well_evidenced = bool(bet and bet["well_evidenced"])
 
+        susp_score, susp_reasons = _suspicion(bet, sample.get("sport_key"))
         summaries.append({
             "fixture_id": fixture_id,
+            "suspicion": susp_score,
+            "suspicion_reasons": susp_reasons,
             "sport_key": sample.get("sport_key"),
             "start_time": sample.get("start_time"),
             "home_team": sample.get("home_team"),
