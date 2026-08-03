@@ -24,7 +24,11 @@ from config import (
     OPTIMAL_MAX_PRICE,
 )
 
+# Signed, so a forwarded message still says where it came from.
+BRAND = "STEAMLINE"
+
 DISCLAIMER = (
+    f"<b>{BRAND}</b> · видим деньги раньше рынка\n"
     "<i>Это расчёт по движению рынка, а не рекомендация. "
     "Ставки — риск потерять деньги.</i>"
 )

@@ -131,3 +131,23 @@ plain = analytics._suspicion(
     "soccer_epl")
 assert plain[0] == 0, plain
 print("suspicion ok: an ordinary 11% move at two books is not flagged")
+
+# --- "был вход" must not mean "we bet it" ----------------------------------
+# Reported 2026-08-07: a movement row read "был вход" for Nongshim Redforce
+# Challengers — KT Rolster Challengers, but the event was in neither strategy.
+# A takeable price and an actual signal are different facts.
+import dashboard  # noqa: E402
+
+storage.init_db()
+solo[0]["move_is_new"] = True
+assert solo[0]["has_entry"] and not solo[0]["alertable"], (
+    "fixture must have a price on offer but no signal", solo[0].get("verdict"))
+storage.save_movement(solo[0], now.isoformat())
+rows = storage.recent_movements(10)
+row = [r for r in rows if r["fixture_id"] == "small1"][0]
+assert row["had_entry"] == 1, "the price was on offer"
+assert row["was_signal"] == 0, "but it was never a signal"
+html = dashboard._movements_table(rows)
+assert "цена была, но не ставили" in html, html[:400]
+assert "поставили</span>" not in html.replace("но не ставили", ""), "claimed a bet it never made"
+print("movements ok: a takeable price that never became a signal says so plainly")

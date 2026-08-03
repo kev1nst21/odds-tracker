@@ -184,6 +184,15 @@ def _conn():
 # running with the old shape and every INSERT naming a new column would fail.
 # Additive only -- nothing here can destroy a row.
 _MIGRATIONS = {
+    "movements": {
+        # "had_entry" used to mean "a bookmaker was still offering the old
+        # price", and the site printed it as "был вход" -- which readers
+        # correctly took to mean "we bet this". Those are different things: a
+        # move can have a takeable price and still be refused as a signal
+        # because only one bookmaker moved. This column records the second,
+        # narrower fact, so the two can be shown apart instead of conflated.
+        "was_signal": "INTEGER NOT NULL DEFAULT 0",
+    },
     "tracked_alerts": {
         # 'aggressive' | 'optimal' -- which strategy bucket this signal falls
         # into. Stored rather than derived so a later change to the 2.8 cut-off
@@ -252,15 +261,16 @@ def save_movement(summary: dict, detected_at: str) -> bool:
             INSERT OR IGNORE INTO movements
                 (detected_at, fixture_id, sport_key, start_time, home_team, away_team,
                  outcome_id, outcome_name, stars, old_price, new_price, drop_pct,
-                 down_count, books_count, had_entry, entry_price)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 down_count, books_count, had_entry, entry_price, was_signal)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (detected_at, summary["fixture_id"], summary.get("sport_key"),
              summary.get("start_time"), summary.get("home_team"), summary.get("away_team"),
              bet["side"], bet["name"], summary.get("stars"),
              bet.get("old_price"), bet.get("new_price"), bet.get("drop_pct"),
              bet.get("down_count"), bet.get("books_count"),
-             1 if summary.get("has_entry") else 0, bet.get("entry_price")),
+             1 if summary.get("has_entry") else 0, bet.get("entry_price"),
+             1 if summary.get("alertable") else 0),
         )
         conn.commit()
         return cur.rowcount > 0
@@ -292,7 +302,7 @@ def movement_stats():
     """
     with _conn() as conn:
         total = conn.execute("SELECT COUNT(*) n FROM movements").fetchone()["n"]
-        with_entry = conn.execute("SELECT COUNT(*) n FROM movements WHERE had_entry=1").fetchone()["n"]
+        with_entry = conn.execute("SELECT COUNT(*) n FROM movements WHERE was_signal=1").fetchone()["n"]
         resolved = conn.execute("SELECT COUNT(*) n FROM movements WHERE resolved=1").fetchone()["n"]
         hits = conn.execute("SELECT COUNT(*) n FROM movements WHERE result='hit'").fetchone()["n"]
         misses = conn.execute("SELECT COUNT(*) n FROM movements WHERE result='miss'").fetchone()["n"]
@@ -319,7 +329,7 @@ def recent_movements(limit: int = 30):
         return conn.execute(
             "SELECT detected_at, fixture_id, sport_key, start_time, home_team, away_team, "
             "       outcome_name, stars, old_price, new_price, drop_pct, down_count, "
-            "       books_count, had_entry, entry_price, resolved, result "
+            "       books_count, had_entry, was_signal, entry_price, resolved, result "
             "FROM movements ORDER BY detected_at DESC LIMIT ?", (limit,),
         ).fetchall()
 

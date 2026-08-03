@@ -210,3 +210,10 @@ esp = summary("f9", "Boostgate eSports", "Su eSports", "home", "Boostgate eSport
 esp["sport_key"] = "esports_dota2"
 assert "Dota 2" in dashboard._event_row(esp), "the discipline is missing from the feed row"
 print("discipline ok: Dota 2 / CS2 / LoL / Футбол / Теннис labelled on the row")
+
+# every "проверено" counter must open into what exactly was checked
+mv_block = dashboard._movement_stats(storage.movement_stats())
+assert "res-moves" in mv_block and "stat-btn" in mv_block, "movements «проверено» not clickable"
+mini_mv = dashboard._mini_movements()
+assert "Cocciaretto" in mini_mv and "1:2" in mini_mv, mini_mv[:300]
+print("movements ok: «проверено» opens the graded moves, with score and P&L")

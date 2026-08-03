@@ -213,6 +213,38 @@ def _funnel_block(f: dict, span: str) -> str:
     )
 
 
+def _mini_movements(limit: int = 10) -> str:
+    """Movements that have been graded, opened from the "проверено" counter.
+
+    Same idea as the strategy cards: a bare count is not checkable. Here it
+    matters more, because these are mostly moves we did NOT bet -- the only
+    way to judge whether the thesis holds is to see how they finished.
+    """
+    rows = [r for r in storage.recent_movements(80) if r["resolved"]][:limit]
+    if not rows:
+        return "<p class='none'>Проверенных движений пока нет — ждём, пока сыграют матчи.</p>"
+    items = []
+    for r in rows:
+        home, away = r["home_team"], r["away_team"]
+        event = f"{home} — {away}" if home and away else str(r["fixture_id"])
+        caught = f"{r['old_price']:.2f}" if r["old_price"] else "—"
+        score = _score_text(r["fixture_id"])
+        score_html = f" · <b>{score}</b>" if score else ""
+        cls, label = _RESULT_LABEL.get(r["result"], ("pending", "⏳ ждём"))
+        pnl = ""
+        if r["result"] == "hit" and r["old_price"]:
+            pnl = f" · <span class='pnl good'>+${FLAT_STAKE * (r['old_price'] - 1):.0f}</span>"
+        elif r["result"] == "miss":
+            pnl = f" · <span class='pnl bad'>−${FLAT_STAKE:.0f}</span>"
+        items.append(
+            f"<li><span class='ms-ev'><b>{html.escape(event)}</b>"
+            f"{_sport_badge(r['sport_key'])}"
+            f"<small>{html.escape(r['outcome_name'] or '')} · до падения {caught}"
+            f"{score_html}{pnl}</small></span><span class='{cls}'>{label}</span></li>"
+        )
+    return "<ul class='mini'>" + "".join(items) + "</ul>"
+
+
 def _movements_table(rows) -> str:
     """Every detected move, priced at the coefficient before it fell."""
     if not rows:
@@ -239,10 +271,21 @@ def _movements_table(rows) -> str:
         else:
             st = ("<span class='pending'>⏳ ждём</span>" + _countdown(r["start_time"], r["fixture_id"])
                   + _live_badge(r["fixture_id"]))
-        # Whether this move was also bettable is the single most useful fact
-        # about it -- it is the difference between the ceiling and the money.
-        mark = ("<span class='tag opt'>был вход</span>" if r["had_entry"]
-                else "<span class='tag agg'>входа не было</span>")
+        # Three states, not two. "был вход" used to mean only that a price was
+        # still on offer, and readers reasonably took it as "we bet this" --
+        # then found the event in no strategy at all. A takeable price and an
+        # actual signal are different things: a move with one bookmaker behind
+        # it gets refused however good the price looks.
+        keys = r.keys() if hasattr(r, "keys") else r
+        was_signal = ("was_signal" in keys) and r["was_signal"]
+        if was_signal:
+            mark = "<span class='tag opt'>поставили</span>"
+        elif r["had_entry"]:
+            mark = ("<span class='tag warnish' title='Цену ещё давали, но движение "
+                    "не подтвердилось — двинулась одна контора'>цена была, "
+                    "но не ставили</span>")
+        else:
+            mark = "<span class='tag agg'>брать было негде</span>"
         items.append(
             f"<tr class='row'><td class='c-stars'>{'★' * (r['stars'] or 0)}</td>"
             f"<td class='c-ev'><b>{html.escape(event)}</b>"
@@ -284,11 +327,17 @@ def _movement_stats(m: dict) -> str:
     return (
         f"<div class='stat-row'>"
         f"<div class='stat'><b>{m.get('total', 0)}</b><span>движений</span></div>"
-        f"<div class='stat'><b>{m.get('with_entry', 0)}</b><span>из них с входом</span></div>"
-        f"<div class='stat'><b>{m.get('resolved', 0)}</b><span>проверено</span></div>"
+        f"<div class='stat'><b>{m.get('with_entry', 0)}</b><span>из них поставили</span></div>"
+        f"<div class='stat'><button class='stat-btn' type='button' data-open='res-moves'"
+        f" aria-expanded='false' aria-controls='res-moves'"
+        f" title='Показать проверенные движения'>{m.get('resolved', 0)}</button>"
+        f"<span>проверено ▾</span></div>"
         f"<div class='stat'><b>{wr}</b><span>заходимость</span></div>"
-        f"<div class='stat'><b>{m.get('total', 0) - (m.get('with_entry') or 0)}</b><span>взять было негде</span></div>"
+        f"<div class='stat'><b>{m.get('total', 0) - (m.get('with_entry') or 0)}</b><span>не ставили</span></div>"
         f"</div>"
+        f"<div class='sig-list' id='res-moves' hidden>"
+        f"<div class='sig-cap'>Проверенные движения — с итогом и счётом</div>"
+        f"{_mini_movements()}</div>"
         f"<div class='bank {cls}'><div class='bank-head'>Если бы мы <b>всегда</b> успевали "
         f"взять коэффициент до падения, по ${int(m.get('stake') or 0)} на движение</div>{body}"
         f"<div class='bank-note'>Это потолок, а не деньги. Цена до падения часто уже никем "
@@ -1010,7 +1059,7 @@ PAGE = Template(r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>KEWA · VILKA · TRACKER — ловим движение коэффициентов</title>
+<title>STEAMLINE — видим деньги раньше рынка</title>
 <meta name="description" content="Трекер движения коэффициентов: ловим момент, когда на исход занесли деньги, и показываем конторы, где старая цена ещё стоит.">
 <meta name="theme-color" content="#08080b">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='16' fill='%23c8ff2e'/><path d='M20 14v14M27 12v16M34 14v14M18 28h18a2 2 0 012 2v2a11 11 0 01-8 10v12a3 3 0 01-6 0V42a11 11 0 01-8-10v-2a2 2 0 012-2z' fill='none' stroke='%2308080b' stroke-width='3.4' stroke-linecap='round' stroke-linejoin='round'/></svg>">
@@ -1180,6 +1229,7 @@ tbody tr:hover td,table tr.row:hover td{background:rgba(255,255,255,.022)}
 .cd-to.live{background:rgba(255,61,129,.13);color:var(--mag)}
 .cd-to.done{background:rgba(255,255,255,.05);color:var(--ink3)}
 .verdicts{display:flex;flex-direction:column;gap:3px;align-items:flex-end;font-size:12.5px;white-space:nowrap}
+.tag.warnish{background:rgba(255,197,49,.13);color:var(--warn);border-color:rgba(255,197,49,.35)}
 .sport{display:inline-block;margin-left:8px;padding:1px 7px;border-radius:5px;background:rgba(74,217,255,.12);color:var(--cy);font-size:10.5px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;vertical-align:middle}
 .sport.esp{background:rgba(255,61,129,.13);color:var(--mag)}
 .b-score{margin-left:9px;padding:1px 8px;border-radius:999px;background:rgba(255,255,255,.07);color:var(--ink);font-family:var(--mono);font-size:12.5px;font-weight:800}
@@ -1315,9 +1365,15 @@ footer a{color:var(--ink2)}
 <nav class="nav">
   <div class="nav-in">
     <span class="mark">
-      <svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="16" fill="#c8ff2e"/>
-      <path d="M20 14v14M27 12v16M34 14v14M18 28h18a2 2 0 012 2v2a11 11 0 01-8 10v12a3 3 0 01-6 0V42a11 11 0 01-8-10v-2a2 2 0 012-2z" fill="none" stroke="#08080b" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      KEWA<span style="color:#c8ff2e">/</span>VILKA
+      <svg viewBox="0 0 64 64" aria-hidden="true">
+      <rect width="64" height="64" rx="16" fill="#08080b"/>
+      <path d="M8 24h16l10 22" fill="none" stroke="#ff3d81" stroke-width="5"
+            stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M8 24h48" fill="none" stroke="#c8ff2e" stroke-width="5"
+            stroke-linecap="round" opacity=".95"/>
+      <circle cx="24" cy="24" r="6.5" fill="#c8ff2e"/>
+      <circle cx="24" cy="24" r="2.6" fill="#08080b"/></svg>
+      STEAM<span style="color:#c8ff2e">LINE</span>
     </span>
     <span class="sp"></span>
     <a class="link" href="#feed">Сигналы</a>
@@ -1334,20 +1390,28 @@ $ticker
 
   <header class="hero">
     <div>
-      <svg class="logo" viewBox="0 0 64 64" aria-label="Логотип KEWA Vilka Tracker">
-        <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stop-color="#c8ff2e"/><stop offset=".55" stop-color="#8ff06a"/>
-          <stop offset="1" stop-color="#4ad9ff"/></linearGradient></defs>
-        <rect x="1" y="1" width="62" height="62" rx="17" fill="url(#g)"/>
-        <g stroke="#08080b" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M20 15v11" fill="none"/><path d="M27 13v13" fill="none"/><path d="M34 15v11" fill="none"/>
-          <path d="M18 26h18a2 2 0 012 2v2a11 11 0 01-8 10v10a3 3 0 01-6 0V40a11 11 0 01-8-10v-2a2 2 0 012-2z" fill="#08080b"/>
-        </g>
-        <circle cx="23.5" cy="32" r="2.4" fill="#c8ff2e"/><circle cx="31.5" cy="32" r="2.4" fill="#c8ff2e"/>
-        <path d="M23 37.6c1.7 2 6.3 2 8 0" fill="none" stroke="#c8ff2e" stroke-width="2.2" stroke-linecap="round"/>
-        <path d="M49 15l-9 14h6l-3 12 10-15h-6z" fill="#ff3d81" stroke="#08080b" stroke-width="2.4" stroke-linejoin="round"/>
+      <svg class="logo" viewBox="0 0 64 64" aria-label="STEAMLINE — трекер движения линии">
+        <defs>
+          <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#1a1a20"/><stop offset="1" stop-color="#08080b"/>
+          </linearGradient>
+          <linearGradient id="hold" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="#c8ff2e"/><stop offset="1" stop-color="#8ff06a"/>
+          </linearGradient>
+        </defs>
+        <rect x="1" y="1" width="62" height="62" rx="17" fill="url(#g)"
+              stroke="rgba(200,255,46,.25)" stroke-width="1.5"/>
+        <!-- the market: holds, then collapses -->
+        <path d="M9 25h15l11 24" fill="none" stroke="#ff3d81" stroke-width="4.6"
+              stroke-linecap="round" stroke-linejoin="round"/>
+        <!-- the one price that has not moved yet: this is the bet -->
+        <path d="M9 25h46" fill="none" stroke="url(#hold)" stroke-width="4.6"
+              stroke-linecap="round"/>
+        <!-- the moment between them -->
+        <circle cx="24" cy="25" r="6.2" fill="#c8ff2e"/>
+        <circle cx="24" cy="25" r="2.4" fill="#08080b"/>
       </svg>
-      <div class="tag">трекер движения линии · $sports_n $sports_word</div>
+      <div class="tag">STEAMLINE · видим деньги раньше рынка · $sports_n $sports_word</div>
       <h1>Ловим <em>деньги</em><br>раньше рынка</h1>
       <p class="sub">Когда на исход <b>заносят крупные деньги</b>, коэффициент проседает —
       но не у всех сразу. Мы ловим этот момент и показываем конторы,
