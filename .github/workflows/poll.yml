@@ -48,11 +48,12 @@ jobs:
     runs-on: ubuntu-latest
     # The loop stops itself 2.5 minutes before the next window; this is only a
     # hard backstop in case a single poll hangs on a slow API call.
-    # Poll window (up to ~27.5 min) plus the hold that paces the chain. The
-    # two are complements, never additive: the later a poll finishes, the less
-    # the hold waits, so a job lands near 30 minutes either way. 40 leaves
-    # room for a slow deploy without ever letting a wedged run sit for an hour.
-    timeout-minutes: 40
+    # Poll window (up to ~27.5 min) plus the hold that paces the chain.
+    # Usually the two are complements -- the later a poll finishes, the less
+    # the hold waits -- but a run that finishes right ON a boundary now skips
+    # to the next one, so the worst case really is both at once: 27.5 + 32.
+    # 65 covers that with room for a slow deploy, and still bounds a wedged run.
+    timeout-minutes: 65
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -181,9 +182,23 @@ jobs:
           # rather than a minute into it.
           target=$(( (now / period + 1) * period - 45 ))
           wait=$(( target - now ))
+          # Observed on the very first cycle after this step shipped: because
+          # the lead above makes each run START 44 seconds before a boundary,
+          # the successor's own poll finishes AFTER that boundary has passed,
+          # its wait computes as zero, and it dispatches instantly. The chain
+          # settled into two runs per window -- one full-length, one 45-second
+          # hop -- quietly doubling the credit burn. Not a runaway, but not the
+          # once-per-window cadence the footer promises either. When the next
+          # boundary is already this close, this run belongs to the window that
+          # is ending, so hand over at the boundary after it.
+          if [ "$wait" -lt 120 ]; then
+            target=$(( target + period ))
+            wait=$(( target - now ))
+          fi
           [ "$wait" -lt 0 ] && wait=0
-          # Can never exceed one window, whatever the arithmetic does.
-          [ "$wait" -gt "$period" ] && wait="$period"
+          # Never more than one window plus the grace above, whatever the
+          # arithmetic does. Job timeout is sized to allow poll + this.
+          [ "$wait" -gt "$(( period + 120 ))" ] && wait=$(( period + 120 ))
           echo "poll finished $(date -u +%H:%M:%S) UTC; holding ${wait}s so the"
           echo "next run starts on the window boundary instead of immediately"
           sleep "$wait"
