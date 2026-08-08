@@ -104,6 +104,75 @@ def _get(path: str, params: dict, treat_404_as_empty: bool = False):
     raise OddsPapiError(f"Gave up on {path} after {MAX_RETRIES} retries (rate limited)")
 
 
+def fetch_settlement(fixture_id: str, on_error=None) -> dict:
+    """How the moneyline settled: {"home": "WIN"|"LOSE"|..., "away": ...}.
+
+    Added 2026-08-08. Until now esports and table tennis were never graded at
+    all -- results.py skipped every OddsPapi sport because The Odds API scores
+    endpoint has never heard of those keys, and no replacement was wired in. The
+    effect was invisible but corrosive: three esports signals sat in "ждут
+    матча" forever, and the published track record was quietly tennis-only while
+    claiming to cover six disciplines.
+
+    This settles the exact outcome we bet rather than a score we would have to
+    interpret. That distinction matters here: an esports "score" is periods and
+    maps, and reading a bo3 or bo5 correctly from period rows is guesswork we
+    do not need to do when the provider states the result outright.
+
+    Values follow the provider: WIN, LOSE, HALFWIN, HALFLOSS, PUSH, CANCELLED,
+    UNDECIDED. Returns {} when the fixture is unknown or the call fails -- the
+    caller leaves the bet pending rather than inventing a verdict.
+    """
+    try:
+        data = _get("/v4/settlements", {"fixtureId": str(fixture_id)},
+                    treat_404_as_empty=True)
+    except OddsPapiError as exc:
+        if on_error:
+            on_error(fixture_id, exc)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    outcomes = (((data.get("markets") or {}).get(MONEYLINE_MARKET) or {})
+                .get("outcomes") or {})
+    out = {}
+    for outcome_id, side in ((OUTCOME_P1, "home"), (OUTCOME_P2, "away")):
+        players = ((outcomes.get(outcome_id) or {}).get("players") or {})
+        for pdata in players.values():
+            result = (pdata or {}).get("result")
+            if result:
+                out[side] = str(result).upper()
+                break
+    return out
+
+
+def fetch_score(fixture_id: str, on_error=None):
+    """(participant1, participant2) for the headline period, or (None, None).
+
+    Period "0" is the match-level score -- maps in LoL, sets in table tennis --
+    which is the number a reader expects next to a finished bet. The numbered
+    periods below it are individual games and are deliberately ignored.
+    """
+    try:
+        data = _get("/v4/scores", {"fixtureId": str(fixture_id)},
+                    treat_404_as_empty=True)
+    except OddsPapiError as exc:
+        if on_error:
+            on_error(fixture_id, exc)
+        return None, None
+    if not isinstance(data, dict):
+        return None, None
+    period = (data.get("scores") or {}).get("0")
+    if not isinstance(period, dict):
+        return None, None
+    p1, p2 = period.get("participant1Score"), period.get("participant2Score")
+    if p1 is None or p2 is None:
+        return None, None
+    try:
+        return float(p1), float(p2)
+    except (TypeError, ValueError):
+        return None, None
+
+
 def list_participants(sport_id: int) -> dict:
     """{participant_id(str): name}. One call per sport; callers should cache."""
     data = _get("/v4/participants", {"sportId": sport_id})

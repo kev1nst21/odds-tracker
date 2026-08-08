@@ -24,8 +24,11 @@ from config import (
     RESULTS_CHECK_INTERVAL_HOURS,
     ODDSPAPI_SPORT_KEYS,
     LIVE_SCORE_MAX_SPORTS,
+    ODDSPAPI_SETTLEMENTS_PER_CYCLE,
+    RESULT_GIVE_UP_HOURS,
 )
 import odds_client
+import oddspapi_client
 import storage
 
 _VALID_SIDES = {"home", "away", "draw"}
@@ -164,8 +167,96 @@ def check_pending_results(now: datetime = None) -> int:
                                               (home_score, away_score)))
         resolved_count += 1
 
+    resolved_count += _resolve_oddspapi(pending, now)
+    resolved_count += _give_up_on_stale(pending, now)
     resolved_count += _resolve_movements(scores_by_fixture, now)
     return resolved_count
+
+
+# The provider's settlement vocabulary, mapped onto ours. HALFWIN/HALFLOSS
+# belong to handicap markets we do not bet here, but they are listed so an
+# unexpected one is handled rather than silently treated as a loss.
+_SETTLEMENT = {
+    "WIN": "hit", "HALFWIN": "hit",
+    "LOSE": "miss", "HALFLOSS": "miss",
+    "PUSH": "n/a", "CANCELLED": "n/a",
+}
+
+
+def _warn_fixture_error(fixture_id, exc):
+    print(f"[results] settlement lookup failed for {fixture_id}: {exc}")
+
+
+def _resolve_oddspapi(pending, now: datetime) -> int:
+    """Grade esports and table tennis, which The Odds API cannot see.
+
+    One settlement call per fixture, capped per cycle. UNDECIDED and unknown
+    fixtures are left alone: a match that has not been settled yet must stay
+    pending, not become a loss because we asked too early.
+    """
+    rows = [r for r in pending if r["sport_key"] in ODDSPAPI_SPORT_KEYS]
+    if not rows:
+        return 0
+
+    resolved = 0
+    seen = {}
+    for row in rows[:ODDSPAPI_SETTLEMENTS_PER_CYCLE]:
+        fid = row["fixture_id"]
+        if fid not in seen:
+            seen[fid] = oddspapi_client.fetch_settlement(fid, on_error=_warn_fixture_error)
+        settlement = seen[fid]
+        side = row["outcome_id"]
+        raw = settlement.get(side)
+        if not raw or raw == "UNDECIDED":
+            continue
+
+        result = _SETTLEMENT.get(raw, "n/a")
+        # The score is only for display, so a missing one must never stop the
+        # bet being graded -- that was the whole failure mode being fixed here.
+        hs, as_ = oddspapi_client.fetch_score(fid, on_error=_warn_fixture_error)
+        if hs is not None and as_ is not None:
+            storage.save_live_score(fid, row["sport_key"], row["home_team"],
+                                    row["away_team"], hs, as_, True, now.isoformat())
+
+        clv_pct, clv_continued = _compute_clv(row)
+        winner = _winner_from_scores(hs, as_)
+        storage.mark_resolved(row["id"], result, now.isoformat(), clv_pct, clv_continued,
+                              _optimal_result(row, winner, side, result, (hs, as_)))
+        resolved += 1
+
+    if resolved:
+        print(f"[results] settled {resolved} esports/table-tennis bet(s) via OddsPapi")
+    return resolved
+
+
+def _give_up_on_stale(pending, now: datetime) -> int:
+    """Close bets whose result can no longer be looked up.
+
+    Not a cosmetic tidy-up. A row that never resolves is counted in "ждут
+    матча" for ever, so the page shows a bigger book than the one we have
+    actually checked -- and the longer the outage, the more flattering the
+    error. Marking them n/a keeps them visible and countable as what they are:
+    signals we failed to verify.
+    """
+    cutoff = now - timedelta(hours=RESULT_GIVE_UP_HOURS)
+    stale = []
+    for row in pending:
+        if not row["start_time"]:
+            continue
+        try:
+            started = datetime.fromisoformat(str(row["start_time"]).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if started < cutoff:
+            stale.append(row)
+
+    for row in stale:
+        clv_pct, clv_continued = _compute_clv(row)
+        storage.mark_resolved(row["id"], "n/a", now.isoformat(), clv_pct, clv_continued, "n/a")
+    if stale:
+        print(f"[results] gave up on {len(stale)} bet(s) older than "
+              f"{RESULT_GIVE_UP_HOURS:.0f}h -- scores no longer available")
+    return len(stale)
 
 
 def refresh_live_scores(now: datetime = None) -> int:

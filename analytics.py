@@ -64,8 +64,11 @@ from config import (
     ENTRY_MAX_OVER_OLD_PCT,
     MIN_MARKET_BOOKS,
     MIN_MOVED_BOOKS,
+    MIN_SIGNAL_STARS,
+    MAX_LEAD_HOURS,
     OUTLIER_MAX_DEVIATION_PCT,
 )
+from datetime import datetime, timedelta, timezone
 
 
 def _median(values):
@@ -528,12 +531,29 @@ def _suspicion(bet, sport_key):
     return len(reasons), reasons
 
 
+def _starts_within(start_iso, hours: float) -> bool:
+    """Is kick-off inside our publishing horizon?
+
+    An unparseable or missing start time returns True: the event is already
+    filtered to pre-match upstream, and refusing to publish because a timestamp
+    looks odd would hide real signals for a formatting reason.
+    """
+    if not start_iso or not hours:
+        return True
+    try:
+        start = datetime.fromisoformat(str(start_iso).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return start <= datetime.now(timezone.utc) + timedelta(hours=hours)
+
+
 LAST_FUNNEL = {}
 
 
 def build_event_summaries(records: list, spikes: list = None, movements: list = None) -> list:
     """One dict per event, most actionable first."""
     funnel = {"events": 0, "with_drop": 0, "big_drop": 0,
+              "low_stars": 0, "off_band": 0, "too_far": 0,
               "thin_market": 0, "all_books_moved": 0, "entry_too_low": 0,
               "price_out_of_range": 0, "signals": 0}
     spikes = spikes or []
@@ -703,6 +723,13 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
                 funnel["all_books_moved"] += 1
             elif not lead["entries"]:
                 funnel["entry_too_low"] += 1
+            elif (lead["stars"] or 0) < MIN_SIGNAL_STARS:
+                funnel["low_stars"] += 1
+            elif not (lead.get("entry_price")
+                      and MIN_SIGNAL_PRICE <= lead["entry_price"] <= MAX_SIGNAL_PRICE):
+                funnel["off_band"] += 1
+            elif not _starts_within(sample.get("start_time"), MAX_LEAD_HOURS):
+                funnel["too_far"] += 1
             else:
                 funnel["signals"] += 1
 
@@ -733,6 +760,27 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
         # still recorded and still shown.
         well_evidenced = bool(bet and bet["well_evidenced"])
 
+        # --- how selective we are, decided 2026-08-08 from the ledger --------
+        #
+        # Three gates, all of which a signal must pass to be published. They
+        # gate the ALERT only: the move is still recorded and still shown in
+        # «Движения», so dropping a tier never means pretending we did not see
+        # it, and the counterfactual columns can keep scoring what we skipped.
+        #
+        # Confidence. Two-star signals went 1 for 7 and lost $796 over the
+        # first 23 settled bets; three-star went 7 for 16 and made $1 980.
+        # "Будем работать на качество" -- fewer events, each one evidenced by
+        # several independent books moving together.
+        strong_enough = bool(bet and (bet["stars"] or 0) >= MIN_SIGNAL_STARS)
+        # Price. The band is enforced on the ENTRY, which is what we would
+        # actually take, not on the pre-drop price we merely observed.
+        entry_in_band = bool(
+            bet and bet.get("entry_price")
+            and MIN_SIGNAL_PRICE <= bet["entry_price"] <= MAX_SIGNAL_PRICE
+        )
+        # Horizon. A price two and a half days out is not the price you get.
+        soon_enough = _starts_within(sample.get("start_time"), MAX_LEAD_HOURS)
+
         # Which funnel bucket THIS event landed in, carried on the summary so
         # the movements row can store it. The funnel used to be counted per
         # poll and summed over 24 hours, which double-counted every event:
@@ -750,6 +798,12 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
             bucket = "all_books_moved"
         elif not bet["entries"]:
             bucket = "entry_too_low"
+        elif not strong_enough:
+            bucket = "low_stars"
+        elif not entry_in_band:
+            bucket = "off_band"
+        elif not soon_enough:
+            bucket = "too_far"
         else:
             bucket = "signal"
 
@@ -769,7 +823,11 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
             "has_entry": has_entry,
             "entry_closed": bool(bet and not has_entry),
             "big_move": big_enough,
-            "alertable": big_enough and has_entry and well_evidenced,
+            "alertable": (big_enough and has_entry and well_evidenced
+                          and strong_enough and entry_in_band and soon_enough),
+            "strong_enough": strong_enough,
+            "entry_in_band": entry_in_band,
+            "soon_enough": soon_enough,
             "well_evidenced": well_evidenced,
             "stars": stars,
             "strategy": strategy,

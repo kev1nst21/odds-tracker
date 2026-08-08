@@ -383,9 +383,11 @@ def funnel_stats(hours: int = 24):
     """
     since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     out = {"big_drop": 0, "thin_market": 0, "all_books_moved": 0,
-           "entry_too_low": 0, "signals": 0}
+           "entry_too_low": 0, "low_stars": 0, "off_band": 0, "too_far": 0,
+           "signals": 0}
     key = {"signal": "signals", "thin_market": "thin_market",
-           "all_books_moved": "all_books_moved", "entry_too_low": "entry_too_low"}
+           "all_books_moved": "all_books_moved", "entry_too_low": "entry_too_low",
+           "low_stars": "low_stars", "off_band": "off_band", "too_far": "too_far"}
     with _conn() as conn:
         rows = conn.execute(
             f"SELECT {_BUCKET_FALLBACK} AS b, COUNT(*) AS n FROM movements"
@@ -754,6 +756,148 @@ def _strategy_columns(strategy: str):
         return ("COALESCE(opt_result, result)",
                 "CASE WHEN opt_kind='straight' THEN entry_price ELSE opt_price END")
     return "result", "entry_price"
+
+
+def breakdown_stats(kind: str = "prematch"):
+    """The same book, cut three ways: by discipline, by how big the drop was,
+    and by confidence.
+
+    Added 2026-08-08. The headline numbers had been hiding the only things in
+    the ledger that actually differed. Cut by sport, tennis was running +5.1%
+    CLV and football MINUS 4.6% -- opposite signs, averaged into one bland
+    figure. Cut by drop size, the relationship ran BACKWARDS: 10-12% drops made
+    +$2 184 while everything above 15% lost every single time, which is the
+    fingerprint of news we do not have rather than of money we can follow.
+
+    None of that is visible on a single average, and none of it can be acted on
+    until it is on the page. Counts come with every row on purpose: most of
+    these buckets are far too small to mean anything yet, and a percentage
+    without its denominator is how a fluke gets promoted to a strategy.
+    """
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT sport_key, stars, old_price, new_price, entry_price, "
+            "       result, clv_pct "
+            "FROM tracked_alerts WHERE kind=? AND result IN ('hit','miss')",
+            (kind,),
+        ).fetchall()
+
+    def blank():
+        return {"n": 0, "hits": 0, "profit": 0.0, "clv_sum": 0.0, "clv_n": 0}
+
+    by_sport, by_drop, by_stars = {}, {}, {}
+    for r in rows:
+        price = r["entry_price"]
+        drop = None
+        if r["old_price"] and r["new_price"]:
+            drop = (r["old_price"] - r["new_price"]) / r["old_price"] * 100
+        buckets = [
+            (by_sport, _sport_family(r["sport_key"])),
+            (by_drop, "10–12%" if drop is None or drop < 12
+             else "12–15%" if drop < 15 else "15%+"),
+            (by_stars, f"{r['stars'] or 0}★"),
+        ]
+        for target, key in buckets:
+            b = target.setdefault(key, blank())
+            b["n"] += 1
+            if r["result"] == "hit":
+                b["hits"] += 1
+                b["profit"] += FLAT_STAKE * ((price or 1) - 1)
+            else:
+                b["profit"] -= FLAT_STAKE
+            if r["clv_pct"] is not None:
+                b["clv_sum"] += r["clv_pct"] * 100
+                b["clv_n"] += 1
+
+    def finish(d):
+        out = {}
+        for k, b in d.items():
+            out[k] = {
+                "n": b["n"], "hits": b["hits"], "profit": b["profit"],
+                "win_rate": (b["hits"] / b["n"] * 100) if b["n"] else None,
+                "clv": (b["clv_sum"] / b["clv_n"]) if b["clv_n"] else None,
+            }
+        return dict(sorted(out.items(), key=lambda kv: -kv[1]["n"]))
+
+    return {"by_sport": finish(by_sport), "by_drop": finish(by_drop),
+            "by_stars": finish(by_stars), "graded": len(rows),
+            "stake": FLAT_STAKE}
+
+
+def counterfactual_stats():
+    """What the rules we DIDN'T adopt would have returned.
+
+    This exists because of a specific temptation. On 2026-08-08 the ledger held
+    23 settled bets, and cutting it by stars, by drop size and by sport all
+    produced flattering splits. Tuning the filters until those 23 look good is
+    not improvement, it is fitting the noise -- and the fit would be invisible
+    afterwards, because the rejected bets simply stop being recorded.
+
+    So instead of trusting the split, we keep scoring the roads not taken. The
+    movements table logs EVERY drop we saw, including the ones the current
+    rules refuse, together with the price that was actually on offer. That
+    makes each rule below a live, running experiment rather than a one-off
+    reading, and in a few hundred bets the answer will be worth something.
+
+    Priced at entry_price, not at the pre-drop price the movements P&L uses:
+    the question here is "would we have made money BETTING this rule", so it
+    has to be the price a person could have taken.
+    """
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT sport_key, stars, old_price, new_price, entry_price, "
+            "       was_signal, result "
+            "FROM movements WHERE resolved=1 AND result IN ('hit','miss') "
+            "  AND entry_price IS NOT NULL"
+        ).fetchall()
+
+    def drop_of(r):
+        if not r["old_price"] or not r["new_price"]:
+            return None
+        return (r["old_price"] - r["new_price"]) / r["old_price"] * 100
+
+    rules = [
+        ("Как сейчас: три звезды, полоса, горизонт",
+         lambda r: r["was_signal"] == 1),
+        ("Если бы вернули две звезды",
+         lambda r: (r["stars"] or 0) >= 2),
+        ("Без падений свыше 15%",
+         lambda r: (drop_of(r) or 0) < 15),
+        ("Только умеренные падения 10–12%",
+         lambda r: (drop_of(r) or 0) < 12),
+        ("Только теннис",
+         lambda r: (r["sport_key"] or "").startswith("tennis")),
+        ("Всё подряд, что было чем взять",
+         lambda _r: True),
+    ]
+
+    out = []
+    for label, keep in rules:
+        picked = [r for r in rows if keep(r)]
+        hits = sum(1 for r in picked if r["result"] == "hit")
+        profit = sum(FLAT_STAKE * (r["entry_price"] - 1) if r["result"] == "hit"
+                     else -FLAT_STAKE for r in picked)
+        out.append({
+            "label": label, "n": len(picked), "hits": hits, "profit": profit,
+            "win_rate": (hits / len(picked) * 100) if picked else None,
+            "roi": (profit / (FLAT_STAKE * len(picked)) * 100) if picked else None,
+        })
+    return {"rules": out, "pool": len(rows), "stake": FLAT_STAKE}
+
+
+def _sport_family(sport_key: str) -> str:
+    key = (sport_key or "").lower()
+    if key.startswith("soccer"):
+        return "Футбол"
+    if key.startswith("tennis"):
+        return "Теннис"
+    if key.startswith("esports"):
+        return "Киберспорт"
+    if key.startswith("table_tennis"):
+        return "Наст. теннис"
+    if key.startswith("basketball"):
+        return "Баскетбол"
+    return key.split("_")[0].title() or "—"
 
 
 def alert_stats(kind: str = "prematch", strategy: str = "aggressive"):

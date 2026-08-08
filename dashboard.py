@@ -38,6 +38,10 @@ from config import (
     CADENCE_LABEL,
     SPIKE_THRESHOLD_PCT,
     OPTIMAL_MAX_PRICE,
+    MIN_SIGNAL_PRICE,
+    MAX_SIGNAL_PRICE,
+    MIN_SIGNAL_STARS,
+    MAX_LEAD_HOURS,
     SAFE_TRIGGER_PRICE,
 )
 
@@ -200,6 +204,12 @@ def _funnel_block(f: dict, span: str) -> str:
         ("двинулась только одна контора — это не рынок", f.get("thin_market") or 0),
         ("просело уже у всех — брать негде", f.get("all_books_moved") or 0),
         ("вход вернул меньше половины падения", f.get("entry_too_low") or 0),
+        (f"меньше {MIN_SIGNAL_STARS} звёзд — мало контор подтвердило",
+         f.get("low_stars") or 0),
+        (f"коэффициент вне полосы {MIN_SIGNAL_PRICE:g}–{MAX_SIGNAL_PRICE:g}",
+         f.get("off_band") or 0),
+        (f"матч дальше {MAX_LEAD_HOURS:g} ч — цена ещё десять раз изменится",
+         f.get("too_far") or 0),
     ]
     rows = "".join(
         f"<li><span>не ставили: {label}</span><b>{n}</b></li>" for label, n in parts if n
@@ -752,6 +762,100 @@ def _unverifiable_note(stats: dict) -> str:
             f"нельзя, и в заходимость они не попадают.</p>")
 
 
+def _clv_class(avg_clv) -> str:
+    """Green above zero, magenta below. A negative CLV is not a small blemish
+    -- it says the market moved AGAINST the price we took, i.e. we were late or
+    reading noise -- so it should not be printed in the same ink as a win."""
+    if avg_clv is None:
+        return "clv-flat"
+    return "clv-good" if avg_clv > 0 else ("clv-bad" if avg_clv < 0 else "clv-flat")
+
+
+def _breakdown_block(bd: dict) -> str:
+    """Where the record actually differs: discipline, size of drop, confidence.
+
+    Kept deliberately plain and always showing n, because every one of these
+    buckets is currently far too small to carry a conclusion. The point is not
+    to declare a winner -- it is to make the differences visible at all, since
+    on a single average they cancel out and disappear.
+    """
+    if not bd or not bd.get("graded"):
+        return ""
+
+    def table(title, data, note):
+        if not data:
+            return ""
+        rows = []
+        for label, v in data.items():
+            clv = f"{v['clv']:+.1f}%" if v["clv"] is not None else "—"
+            wr = f"{v['win_rate']:.0f}%" if v["win_rate"] is not None else "—"
+            money = f"{v['profit']:+,.0f}$".replace(",", " ")
+            cls = "pos" if v["profit"] > 0 else ("neg" if v["profit"] < 0 else "")
+            rows.append(
+                f"<tr><td>{html.escape(label)}</td><td class='num'>{v['n']}</td>"
+                f"<td class='num'>{wr}</td>"
+                f"<td class='num {_clv_class(v['clv'] / 100 if v['clv'] is not None else None)}'>{clv}</td>"
+                f"<td class='num {cls}'>{money}</td></tr>"
+            )
+        return (f"<div class='bd-card'><h4>{title}</h4>"
+                f"<table class='bd'><thead><tr><th>{note}</th><th class='num'>ставок</th>"
+                f"<th class='num'>заход.</th><th class='num'>CLV</th>"
+                f"<th class='num'>флэт ${bd['stake']:.0f}</th></tr></thead>"
+                f"<tbody>{''.join(rows)}</tbody></table></div>")
+
+    return (
+        "<div class='breakdown reveal'>"
+        "<h3>ГДЕ РЕЗУЛЬТАТ РАЗЛИЧАЕТСЯ</h3>"
+        f"<p class='bd-cap'>Те же {bd['graded']} сыгравших ставки, разрезанные три раза. "
+        "Средняя цифра по всему журналу прячет именно то, что стоит знать: разные "
+        "виды спорта и разные по величине падения ведут себя по-разному и в среднем "
+        "гасят друг друга. Смотри на колонку «ставок» — почти везде её пока слишком "
+        "мало, чтобы делать вывод, и это честная часть картины.</p>"
+        + table("По дисциплине", bd.get("by_sport"), "спорт")
+        + table("По величине падения", bd.get("by_drop"), "падение")
+        + table("По звёздам", bd.get("by_stars"), "уверенность")
+        + "</div>"
+    )
+
+
+def _counterfactual_block(cf: dict) -> str:
+    """The rules we did not adopt, scored on the same live data.
+
+    The honest counterweight to any filter change. When we tightened to three
+    stars the alternative stopped producing signals -- and a rule that stops
+    producing evidence can never be shown to have been wrong. This block keeps
+    scoring it from the movements ledger, so "мы правильно отрезали 2★" stays a
+    measurement instead of quietly becoming folklore.
+    """
+    if not cf or not cf.get("pool"):
+        return ""
+    rows = []
+    for r in cf["rules"]:
+        money = f"{r['profit']:+,.0f}$".replace(",", " ")
+        cls = "pos" if r["profit"] > 0 else ("neg" if r["profit"] < 0 else "")
+        wr = f"{r['win_rate']:.0f}%" if r["win_rate"] is not None else "—"
+        roi = f"{r['roi']:+.0f}%" if r["roi"] is not None else "—"
+        rows.append(
+            f"<tr><td>{html.escape(r['label'])}</td><td class='num'>{r['n']}</td>"
+            f"<td class='num'>{wr}</td><td class='num {cls}'>{money}</td>"
+            f"<td class='num {cls}'>{roi}</td></tr>"
+        )
+    return (
+        "<div class='breakdown reveal'>"
+        "<h3>ЧТО БЫ ДАЛИ ДРУГИЕ ПРАВИЛА</h3>"
+        f"<p class='bd-cap'>Считается по журналу движений — там лежит каждое падение, "
+        f"включая те, что нынешние правила не публикуют. Всего пригодных для проверки "
+        f"движений: {cf['pool']}. Флэт ${cf['stake']:.0f} по цене, которую реально "
+        "давали. Это не предложение поменять правила: на такой выборке любая строка "
+        "может оказаться случайностью. Смысл в том, чтобы отрезанное продолжало "
+        "считаться — иначе решение «2★ не нужны» уже никогда не проверить.</p>"
+        "<table class='bd'><thead><tr><th>правило</th><th class='num'>ставок</th>"
+        "<th class='num'>заход.</th><th class='num'>итог</th>"
+        "<th class='num'>доходность</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div>"
+    )
+
+
 def _strategy_card(stats: dict, title: str, subtitle: str, cls: str, recent=None) -> str:
     win_rate = stats["win_rate"]
     win_rate_html = f"{win_rate:.0f}%" if win_rate is not None else "—"
@@ -764,6 +868,8 @@ def _strategy_card(stats: dict, title: str, subtitle: str, cls: str, recent=None
         <p>{subtitle}</p>
       </div>
       <div class="stat-row">
+        <div class="stat lead"><b class="{_clv_class(avg_clv)}">{avg_clv_html}</b><span>средний CLV</span></div>
+        <div class="stat"><b>{win_rate_html}</b><span>заходимость</span></div>
         <div class="stat"><button class="stat-btn" type="button" data-open="sig-{cls}"
              aria-expanded="false" aria-controls="sig-{cls}"
              title="Показать последние сигналы">{stats['total']}</button><span>сигналов ▾</span></div>
@@ -771,9 +877,12 @@ def _strategy_card(stats: dict, title: str, subtitle: str, cls: str, recent=None
              aria-expanded="false" aria-controls="res-{cls}"
              title="Показать сыгравшие">{stats['resolved']}</button><span>проверено ▾</span></div>
         <div class="stat"><b>{stats['pending']}</b><span>ждут матча</span></div>
-        <div class="stat"><b>{win_rate_html}</b><span>заходимость</span></div>
-        <div class="stat"><b>{avg_clv_html}</b><span>средний CLV</span></div>
       </div>
+      <p class="lead-note">CLV стоит первым не для красоты. Он говорит, взяли ли мы
+      цену раньше рынка, и по нашим же данным делит исходы почти начисто:
+      у зашедших ставок он в среднем сильно выше нуля, у незашедших около нуля
+      или ниже. Заходимость на такой выборке — ещё шум, CLV набирает смысл
+      в разы быстрее.</p>
       {_unverifiable_note(stats)}
       <div class="sig-list" id="sig-{cls}" hidden>
         <div class="sig-cap">Последние сигналы этой стратегии</div>
@@ -1184,6 +1293,23 @@ body::after{
 .funnel li.fn-top b{color:var(--mag)}
 .funnel li.fn-ok{border-top:1px solid var(--line);padding-top:8px}
 .funnel li.fn-ok b{color:var(--lime);font-size:19px}
+.stat.lead b{font-size:26px}
+.clv-good{color:var(--lime)}
+.clv-bad{color:var(--mag)}
+.clv-flat{color:var(--ink2)}
+.lead-note{margin:6px 0 0;font-size:12px;line-height:1.5;color:var(--ink2)}
+.breakdown{margin:22px 0 0;background:var(--card);border:1px solid var(--line);border-radius:15px;padding:16px 18px}
+.breakdown h3{font-family:Unbounded,sans-serif;font-size:14px;margin:0 0 6px;text-transform:uppercase}
+.bd-cap{margin:0 0 14px;font-size:12.5px;line-height:1.55;color:var(--ink2)}
+.bd-card{margin:0 0 14px}
+.bd-card h4{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink2);margin:0 0 6px}
+table.bd{width:100%;border-collapse:collapse;font-size:13px}
+table.bd th{text-align:left;font-weight:600;color:var(--ink2);font-size:11.5px;
+  text-transform:uppercase;letter-spacing:.04em;padding:0 8px 6px 0;border-bottom:1px solid var(--line)}
+table.bd td{padding:7px 8px 7px 0;border-bottom:1px solid var(--line)}
+table.bd td.num,table.bd th.num{text-align:right;font-family:var(--mono)}
+table.bd td.pos{color:var(--lime)}
+table.bd td.neg{color:var(--mag)}
 
 /* ----------------------------------------------------------------- bento */
 h2{font-family:Unbounded,sans-serif;font-weight:800;font-size:clamp(22px,3vw,30px);
@@ -1507,6 +1633,10 @@ $ticker
     $stats_optimal
   </div>
 
+  $breakdown_block
+
+  $counterfactual_block
+
   <h3 style="font-family:Unbounded,sans-serif;font-size:15px;margin:26px 0 8px;text-transform:uppercase">Сыгравшие сигналы — $last_n</h3>
   <p class="lead small">Нажми на строку, чтобы раскрыть: обе цены, что ставила оптимальная,
   счёт матча и CLV.</p>
@@ -1788,6 +1918,8 @@ def render_dashboard(summaries: list, quota: dict = None):
             optimal, "Оптимальная",
             f"До {OPTIMAL_MAX_PRICE:g} — та же ставка. Выше — вход мягче: двойной шанс в футболе, фора там, где ничьей нет.", "opt",
             storage.recent_bets(5, "prematch", "optimal")),
+        breakdown_block=_breakdown_block(storage.breakdown_stats("prematch")),
+        counterfactual_block=_counterfactual_block(storage.counterfactual_stats()),
         movements_table=_movements_table(storage.recent_movements(30)),
         movement_stats=_movement_stats(storage.movement_stats()),
         active_signals=_active_signals(active),

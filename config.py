@@ -237,7 +237,11 @@ EXCHANGE_BOOKMAKERS = ["betfair_ex_eu", "betfair_ex_uk", "betfair_ex_au", "match
 # супер маленьких кофов". Above this the price is a lottery ticket -- the
 # money that moves it is not necessarily informed, and one win in six flatters
 # the record without meaning anything.
-MAX_SIGNAL_PRICE = float(os.getenv("MAX_SIGNAL_PRICE", "5.5"))
+# 2026-08-08, tightened again to 5.0 by user decision: "максимальный коф
+# который будем использовать это 5". The ledger supported it -- across 23
+# settled bets nothing above the band had produced a win, and long prices are
+# where a single lucky result flatters a small sample most.
+MAX_SIGNAL_PRICE = float(os.getenv("MAX_SIGNAL_PRICE", "5.0"))
 
 # A decimal price at or below this is not a real market -- 1.00 pays nothing
 # back, and anything under ~1.05 is a settled or suspended line rather than a
@@ -263,6 +267,35 @@ PREMATCH_ONLY = os.getenv("PREMATCH_ONLY", "1") not in ("0", "false", "False")
 # market is already effectively live -- doesn't sneak through.
 PREMATCH_BUFFER_MINUTES = int(os.getenv("PREMATCH_BUFFER_MINUTES", "3"))
 
+# --- how selective the product is -------------------------------------------
+#
+# Set 2026-08-08 from the ledger rather than from taste. Across the first 40
+# signals (23 settled) the split by confidence was stark: two-star signals went
+# 1 for 7 and lost $796, three-star signals went 7 for 16 and made $1 980. The
+# user's call was to stop publishing anything below three stars -- "будем
+# работать на качество" -- and take fewer, better events.
+#
+# Worth being clear about what this does NOT claim: 23 settled bets cannot
+# prove a two-star signal is worthless. What it does is stop spending attention
+# and credibility on the tier that has never paid, while COUNTERFACTUALS below
+# keep measuring the tier we dropped, so the decision stays checkable instead
+# of becoming folklore.
+MIN_SIGNAL_STARS = int(os.getenv("MIN_SIGNAL_STARS", "3"))
+
+# Do not publish a signal for a match that is further away than this.
+#
+# Two reasons, and the second matters more. A price three days out is not the
+# price you will get: the line is thin, limits are low, and it will be reissued
+# several times before kick-off, so "мы взяли 4.40" is a claim we cannot stand
+# behind. And a signal that sits on the page for three days is read as a
+# standing recommendation rather than as a moment -- the whole product is about
+# a window that is open now.
+#
+# 2026-08-08: set to 48 and raised to 60 the same day at the user's request --
+# far enough to keep weekend fixtures spotted on a Friday, still short of the
+# multi-day window where the quoted price stops being real.
+MAX_LEAD_HOURS = float(os.getenv("MAX_LEAD_HOURS", "60"))
+
 # How much better than the computed fair (no-vig) price a bookmaker has to be
 # before the analyst calls it value, in percent. Below this the edge is inside
 # the model's own error bars.
@@ -277,6 +310,24 @@ LIVE_MIN_SPREAD_PCT = float(os.getenv("LIVE_MIN_SPREAD_PCT", "15.0"))
 # cannot be looked up through The Odds API scores endpoint -- it has never
 # heard of them -- so grading skips them instead of erroring every cycle.
 ODDSPAPI_SPORT_KEYS = {"esports_cs2", "esports_dota2", "esports_lol", "table_tennis"}
+
+# Esports results are settled one fixture at a time (OddsPapi has no per-sport
+# scores sweep), so this is a spend cap per results check rather than a limit
+# on how many we care about. Twelve is comfortably more than the esports
+# signals a three-star filter produces in a day, and it stops a backlog from
+# turning into a burst of requests after an outage.
+ODDSPAPI_SETTLEMENTS_PER_CYCLE = int(os.getenv("ODDSPAPI_SETTLEMENTS_PER_CYCLE", "12"))
+
+# When to stop asking about a match and record that we could not check it.
+#
+# The Odds API scores endpoint only reaches three days back, so a bet missed
+# for longer than that can never be graded -- and until now those rows sat in
+# "ждут матча" for ever, quietly inflating the pending count and making the
+# record look bigger than the part of it we had actually verified. After the
+# 46-hour outage on 2026-08-06 five bets were in exactly that state, two of
+# them 60 and 70 hours past kick-off. Past this age we mark them n/a and say
+# so, because an honest gap is worth more than a number that never resolves.
+RESULT_GIVE_UP_HOURS = float(os.getenv("RESULT_GIVE_UP_HOURS", "96"))
 
 # A bookmaker counts as "hasn't moved yet" -- i.e. still worth betting into --
 # only if its price is at least this much above where the books that DID move

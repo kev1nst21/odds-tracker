@@ -255,3 +255,35 @@ assert "res-moves" in mv_block and "stat-btn" in mv_block, "movements «пров
 mini_mv = dashboard._mini_movements()
 assert "Cocciaretto" in mini_mv and "1:2" in mini_mv, mini_mv[:300]
 print("movements ok: «проверено» opens the graded moves, with score and P&L")
+
+# --- CLV first, plus the two analysis blocks --------------------------------
+# Requested 2026-08-08 after the ledger showed CLV separating outcomes almost
+# cleanly (+12.4% on winners, -1.4% on losers) while win rate on 23 bets was
+# still noise. And the breakdown block exists because a single average hid the
+# only real differences: tennis +5.1% CLV against football -4.6%, and drops
+# above 15% losing every time while 10-12% drops made money.
+agg = storage.alert_stats("prematch", "aggressive")
+card = dashboard._strategy_card(agg, "АГРЕССИВНАЯ", "sub", "agg",
+                                storage.recent_bets(5, "prematch", "aggressive"))
+i_clv, i_wr = card.index("средний CLV"), card.index("заходимость")
+assert i_clv < i_wr, "CLV must be rendered before win rate, it is the headline now"
+assert "clv-good" in card or "clv-bad" in card or "clv-flat" in card, "CLV not colour-coded"
+print("карточка ok: CLV стоит первым и раскрашен по знаку")
+
+bd = storage.breakdown_stats("prematch")
+block = dashboard._breakdown_block(bd)
+if bd["graded"]:
+    assert "ГДЕ РЕЗУЛЬТАТ РАЗЛИЧАЕТСЯ" in block and "ставок" in block, block[:300]
+    print(f"разбивки ok: {bd['graded']} сыгравших, разрезаны по спорту/падению/звёздам")
+
+cf = storage.counterfactual_stats()
+cfb = dashboard._counterfactual_block(cf)
+if cf["pool"]:
+    assert "вернули две звезды" in cfb, cfb[:300]
+    print(f"контрфактические ok: {cf['pool']} движений, {len(cf['rules'])} правил считаются параллельно")
+
+p3 = dashboard.render_dashboard([], quota={"remaining": 9999, "used": 5})
+page3 = open(p3, encoding="utf-8").read()
+assert "$breakdown_block" not in page3 and "$counterfactual_block" not in page3, \
+    "a template placeholder was left unsubstituted"
+print(f"страница ok: {len(page3)} байт, плейсхолдеров не осталось")
