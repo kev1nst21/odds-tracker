@@ -86,14 +86,24 @@ jobs:
       #        instead of over one poll. Rows logged under any of those rules
       #        cannot be compared with rows logged under these, so the record
       #        starts clean rather than mixing five definitions in one table.
+      #   -v5- (2026-08-08) full restart, asked for explicitly: "перезалей стату
+      #        заново, чтобы везде были нули, и я смог посмотреть результат с
+      #        чистого листа". What counts as a signal changed on three axes the
+      #        same day -- the confidence floor rose to three stars, the price
+      #        ceiling came down from 5.5 to 5.0, and a 60-hour publishing
+      #        horizon appeared. On top of that esports became gradeable for the
+      #        first time, so the old rows are not merely looser than the new
+      #        ones: part of that book was scored by a different instrument and
+      #        part of it was never scored at all. Averaging the two together
+      #        would make every number on the page mean nothing.
       # Schema changes do NOT justify a bump -- new columns arrive through
       # storage._migrate(). Only a change to what counts as a signal does.
       - name: Restore odds history DB
         uses: actions/cache@v4
         with:
           path: data
-          key: odds-history-v4-${{ github.run_id }}
-          restore-keys: odds-history-v4-
+          key: odds-history-v5-${{ github.run_id }}
+          restore-keys: odds-history-v5-
 
       - run: pip install -r requirements.txt
 
@@ -105,7 +115,10 @@ jobs:
       # froze on its last good render -- the worst kind of failure, one that
       # looks like a calm market. Offline, costs nothing, and fails loudly.
       - name: Smoke test the pipeline before spending credits
-        run: python test_smoke.py
+        run: |
+          python test_smoke.py
+          python test_selection.py
+          python test_grading.py
 
       - name: Poll the market for this window
         env:
