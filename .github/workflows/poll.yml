@@ -48,7 +48,11 @@ jobs:
     runs-on: ubuntu-latest
     # The loop stops itself 2.5 minutes before the next window; this is only a
     # hard backstop in case a single poll hangs on a slow API call.
-    timeout-minutes: 32
+    # Poll window (up to ~27.5 min) plus the hold that paces the chain. The
+    # two are complements, never additive: the later a poll finishes, the less
+    # the hold waits, so a job lands near 30 minutes either way. 40 leaves
+    # room for a slow deploy without ever letting a wedged run sit for an hour.
+    timeout-minutes: 40
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -133,6 +137,43 @@ jobs:
       - name: Deploy dashboard to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+      # PUT A FLOOR UNDER THE CYCLE TIME. Measured 2026-08-08: the chain ran
+      # away and burned 3 052 credits in 50 minutes -- a month's quota in under
+      # two days.
+      #
+      # The mechanism: runner.py anchors its poll times to absolute clock
+      # multiples (:00 and :30 at this cadence) and stops 2.5 minutes before
+      # its window ends. A run that STARTS just after an anchor therefore has
+      # no scheduled poll left inside its own window: it polls once on entry,
+      # falls straight out of the loop in about 45 seconds, and the step below
+      # asks for a successor -- which starts in the same band and does exactly
+      # the same. Runs #712, #713, #715 and #716 took 55, 63, 54 and 47
+      # seconds each. Nothing bounded how fast the chain could spin, because
+      # until the outage no run had ever finished early.
+      #
+      # This wait is that bound. It sits AFTER the deploy deliberately: the
+      # dashboard goes out the moment the poll is done, and only the REQUEST
+      # for the next run waits. Anchored to the wall clock rather than to
+      # elapsed time, so a chain knocked out of alignment walks back onto
+      # :00/:30 by itself instead of drifting.
+      - name: Hold until the next polling window opens
+        if: always()
+        env:
+          PUBLISH_INTERVAL_MINUTES: "30"
+        run: |
+          period=$(( PUBLISH_INTERVAL_MINUTES * 60 ))
+          now=$(date -u +%s)
+          # A small lead, so the successor is booting as the window opens
+          # rather than a minute into it.
+          target=$(( (now / period + 1) * period - 45 ))
+          wait=$(( target - now ))
+          [ "$wait" -lt 0 ] && wait=0
+          # Can never exceed one window, whatever the arithmetic does.
+          [ "$wait" -gt "$period" ] && wait="$period"
+          echo "poll finished $(date -u +%H:%M:%S) UTC; holding ${wait}s so the"
+          echo "next run starts on the window boundary instead of immediately"
+          sleep "$wait"
 
       # Ask GitHub to start the next window, because the schedule above cannot
       # be relied on (see the note at the top of this file).
