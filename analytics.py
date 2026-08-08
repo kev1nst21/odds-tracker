@@ -733,9 +733,30 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
         # still recorded and still shown.
         well_evidenced = bool(bet and bet["well_evidenced"])
 
+        # Which funnel bucket THIS event landed in, carried on the summary so
+        # the movements row can store it. The funnel used to be counted per
+        # poll and summed over 24 hours, which double-counted every event:
+        # a move is measured against the price an hour ago, so the same drop
+        # is re-detected on every cycle inside that hour and the header
+        # claimed six movements where the ledger held three. Counting from the
+        # deduplicated movements table instead makes the two agree by
+        # construction. Order matches the alert rules above, so "signal" here
+        # is exactly "alertable".
+        if not big_enough or not bet:
+            bucket = None
+        elif not well_evidenced:
+            bucket = "thin_market"
+        elif bet["left_count"] == 0:
+            bucket = "all_books_moved"
+        elif not bet["entries"]:
+            bucket = "entry_too_low"
+        else:
+            bucket = "signal"
+
         susp_score, susp_reasons = _suspicion(bet, sample.get("sport_key"))
         summaries.append({
             "fixture_id": fixture_id,
+            "funnel_bucket": bucket,
             "suspicion": susp_score,
             "suspicion_reasons": susp_reasons,
             "sport_key": sample.get("sport_key"),

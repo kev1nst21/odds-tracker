@@ -211,6 +211,44 @@ esp["sport_key"] = "esports_dota2"
 assert "Dota 2" in dashboard._event_row(esp), "the discipline is missing from the feed row"
 print("discipline ok: Dota 2 / CS2 / LoL / Футбол / Теннис labelled on the row")
 
+# --- the funnel must count each move once, not once per poll ----------------
+# Reported 2026-08-03: the block said 6 movements where the list underneath it
+# held 3. It summed funnel_log, which has a row per POLL -- and since a drop is
+# measured against the price an hour ago, the same event was re-counted on
+# every cycle inside that hour. Counting off the deduplicated movements table
+# is the fix, and this asserts the two numbers now agree.
+for cycle in range(4):                       # four polls, same three events
+    at = (now - timedelta(minutes=45 - cycle * 10)).isoformat()
+    storage.save_funnel({"big_drop": 3, "thin_market": 0, "all_books_moved": 1,
+                         "entry_too_low": 0, "signals": 2}, at)
+    for s in (won, shut, open_):
+        storage.save_movement(s, at)
+
+fn = storage.funnel_stats(24)
+ledger = len(storage.recent_movements(100))
+assert fn["big_drop"] == ledger == 3, (fn, ledger)
+assert fn["signals"] == 2, fn                 # won + open_ had an entry
+assert fn["all_books_moved"] == 1, fn         # shut had none
+assert fn["big_drop"] == fn["thin_market"] + fn["all_books_moved"] \
+    + fn["entry_too_low"] + fn["signals"], fn
+print(f"funnel ok: 4 polls over the same 3 moves report {fn['big_drop']}, "
+      f"matching the {ledger} rows in the ledger (was 12)")
+
+# and a bucket recorded explicitly by analytics beats the legacy fallback:
+# this row HAS a takeable price, so the fallback would call it thin_market
+# anyway -- what is being checked is that a stored 'entry_too_low' survives
+# instead of being re-derived into the wrong bucket.
+low = summary("f7", "Riga II", "Valmiera II", "home", "Riga II",
+              2.90, 2.55, 2.88, "betsson", 1, soon)
+low["alertable"] = False
+low["funnel_bucket"] = "entry_too_low"
+assert storage.save_movement(low, now.isoformat())
+fn2 = storage.funnel_stats(24)
+assert fn2["entry_too_low"] == 1, fn2
+assert fn2["big_drop"] == fn["big_drop"] + 1, (fn2, fn)
+assert fn2["signals"] == fn["signals"], "an unbet move was counted as a signal"
+print("funnel ok: an explicit bucket is stored and counted, not re-derived")
+
 # every "проверено" counter must open into what exactly was checked
 mv_block = dashboard._movement_stats(storage.movement_stats())
 assert "res-moves" in mv_block and "stat-btn" in mv_block, "movements «проверено» not clickable"

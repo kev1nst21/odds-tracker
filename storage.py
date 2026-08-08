@@ -192,6 +192,11 @@ _MIGRATIONS = {
         # because only one bookmaker moved. This column records the second,
         # narrower fact, so the two can be shown apart instead of conflated.
         "was_signal": "INTEGER NOT NULL DEFAULT 0",
+        # Which funnel bucket this move landed in: 'signal' | 'thin_market' |
+        # 'all_books_moved' | 'entry_too_low'. Stored here so the funnel can be
+        # counted off deduplicated rows instead of summed per poll -- see
+        # funnel_stats() for why the old sum double-counted.
+        "bucket": "TEXT",
     },
     "tracked_alerts": {
         # 'aggressive' | 'optimal' -- which strategy bucket this signal falls
@@ -261,8 +266,8 @@ def save_movement(summary: dict, detected_at: str) -> bool:
             INSERT OR IGNORE INTO movements
                 (detected_at, fixture_id, sport_key, start_time, home_team, away_team,
                  outcome_id, outcome_name, stars, old_price, new_price, drop_pct,
-                 down_count, books_count, had_entry, entry_price, was_signal)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 down_count, books_count, had_entry, entry_price, was_signal, bucket)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (detected_at, summary["fixture_id"], summary.get("sport_key"),
              summary.get("start_time"), summary.get("home_team"), summary.get("away_team"),
@@ -270,7 +275,7 @@ def save_movement(summary: dict, detected_at: str) -> bool:
              bet.get("old_price"), bet.get("new_price"), bet.get("drop_pct"),
              bet.get("down_count"), bet.get("books_count"),
              1 if summary.get("has_entry") else 0, bet.get("entry_price"),
-             1 if summary.get("alertable") else 0),
+             1 if summary.get("alertable") else 0, summary.get("funnel_bucket")),
         )
         conn.commit()
         return cur.rowcount > 0
@@ -349,23 +354,48 @@ def save_funnel(counts: dict, at: str):
         conn.commit()
 
 
+# A movements row written before the bucket column existed still has to land
+# somewhere. Two of the three rejection reasons are recoverable from what was
+# already stored -- a takeable price that never became a signal can only mean
+# the evidence was too thin, and no takeable price at all means the market had
+# already moved everywhere. "entry_too_low" is not recoverable and folds into
+# the latter, which is the honest place for it: either way there was nothing
+# worth taking.
+_BUCKET_FALLBACK = (
+    "COALESCE(bucket, CASE WHEN was_signal=1 THEN 'signal'"
+    " WHEN had_entry=1 THEN 'thin_market' ELSE 'all_books_moved' END)"
+)
+
+
 def funnel_stats(hours: int = 24):
     """Where the last day's market moves stopped being signals.
 
     This is the answer to "у нас 22 движения, где они?" -- every one of them
     is in exactly one of these buckets, and the buckets sum to the total.
+
+    2026-08-04: counted off the movements table, not summed from funnel_log.
+    funnel_log holds one row per POLL, and a drop is measured against the
+    price an hour ago -- so the same event was counted again on every cycle
+    inside that hour and the block claimed six movements where the ledger
+    listed three. movements is deduplicated on (fixture_id, outcome_id), so
+    counting there makes the header and the list agree by construction rather
+    than by luck. funnel_log is still written; it is the per-poll diagnostic.
     """
     since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    out = {"big_drop": 0, "thin_market": 0, "all_books_moved": 0,
+           "entry_too_low": 0, "signals": 0}
+    key = {"signal": "signals", "thin_market": "thin_market",
+           "all_books_moved": "all_books_moved", "entry_too_low": "entry_too_low"}
     with _conn() as conn:
-        row = conn.execute(
-            "SELECT COALESCE(SUM(big_drop),0) AS big_drop,"
-            " COALESCE(SUM(thin_market),0) AS thin_market,"
-            " COALESCE(SUM(all_books_moved),0) AS all_books_moved,"
-            " COALESCE(SUM(entry_too_low),0) AS entry_too_low,"
-            " COALESCE(SUM(signals),0) AS signals"
-            " FROM funnel_log WHERE at>=?", (since,),
-        ).fetchone()
-        return dict(row) if row else {}
+        rows = conn.execute(
+            f"SELECT {_BUCKET_FALLBACK} AS b, COUNT(*) AS n FROM movements"
+            " WHERE detected_at>=? GROUP BY b", (since,),
+        ).fetchall()
+    for r in rows:
+        out["big_drop"] += r["n"]
+        if r["b"] in key:
+            out[key[r["b"]]] += r["n"]
+    return out
 
 
 def prune_snapshots(hours: int = None) -> int:
