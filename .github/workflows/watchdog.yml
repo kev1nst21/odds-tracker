@@ -1,0 +1,67 @@
+name: Watchdog
+
+# Watches poll.yml and unsticks it. See watchdog.py for the incident this
+# exists because of (46 hours of frozen dashboard, 2026-08-06/08).
+#
+# Deliberately in its OWN concurrency group. Putting it in poll-odds would mean
+# the watchdog queues behind exactly the jam it is supposed to clear.
+
+on:
+  schedule:
+    - cron: "22 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  # Enough to list and cancel runs of the other workflow. Notably NOT enough to
+  # start one -- GitHub blocks GITHUB_TOKEN from triggering workflows on
+  # purpose, which is why watchdog.py reaches for WORKFLOW_PAT to restart and
+  # falls back to the cron schedule when it is absent.
+  actions: write
+  contents: read
+
+concurrency:
+  group: poll-watchdog
+  cancel-in-progress: true
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Its own cache, deliberately not the poller's: the "already alerted"
+      # flag has to survive between hours so the bot reports an incident once
+      # instead of every hour, but a watchdog with write access to the odds
+      # database would be one bad line away from becoming the outage.
+      # Run-id key + prefix restore, same trick as poll.yml -- actions/cache
+      # skips the save when the exact key already exists.
+      - name: Restore watchdog state
+        uses: actions/cache/restore@v4
+        with:
+          path: wdstate
+          key: watchdog-state-
+          restore-keys: watchdog-state-
+
+      - run: pip install requests
+
+      - name: Check the poller and clear any jam
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_PAT: ${{ secrets.WORKFLOW_PAT }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python watchdog.py
+
+      - name: Save watchdog state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: wdstate
+          key: watchdog-state-${{ github.run_id }}
