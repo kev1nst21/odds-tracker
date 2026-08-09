@@ -522,7 +522,16 @@ else:
 # often the page changes. Stated separately on the site rather than blurred
 # together, because they are genuinely different numbers: the bot fires on
 # every poll, the page catches up once per run.
-PUBLISH_INTERVAL_MINUTES = int(os.getenv("PUBLISH_INTERVAL_MINUTES", "30"))
+#
+# 2026-08-09: this now DEFAULTS to the poll interval instead of a hardcoded 30.
+# The two being independent was fine while both happened to be 30, but the
+# moment cadence.json says 20 the run window still spans 30 minutes, so a run
+# polls at :00 and :20 and the next one at :30 and :50 -- an advertised
+# "каждые 20 минут" delivered as an uneven 20/10/20/10 sawtooth. Tying them
+# together means changing cadence.json alone stays the only lever, which is the
+# whole point of that file.
+PUBLISH_INTERVAL_MINUTES = int(os.getenv("PUBLISH_INTERVAL_MINUTES")
+                               or POLL_INTERVAL_MINUTES)
 
 # Stop polling inside a run if the provider's monthly credit balance falls
 # below this. A 3-minute cadence burns credits ten times faster than a
