@@ -80,8 +80,45 @@ BASELINE_WINDOW_MINUTES = int(os.getenv("BASELINE_WINDOW_MINUTES", "60"))
 # Safety rail on the above. If the only price we hold for a line is much older
 # than the window (a league we poll rarely, or one that vanished for a while),
 # comparing against it would report slow multi-day drift as a sudden move.
-# Anything older than window x this is not a baseline, it's history.
-BASELINE_MAX_AGE_MULT = float(os.getenv("BASELINE_MAX_AGE_MULT", "3"))
+# Anything older than this is not a baseline, it's history.
+#
+# 2026-08-09: THIS NUMBER SILENTLY BLINDED THE PRODUCT FOR A DAY, and the way
+# it did so is worth writing down because the mistake was structural, not
+# arithmetic.
+#
+# It used to be expressed as a multiplier (window x 3 = 180 minutes), which
+# reads like a property of the measurement. It is not. It is a constraint on
+# the POLLING SCHEDULE: a line can only be compared if we looked at it again
+# within this many minutes. The wide sweep rotates 5 slots per cycle across
+# ~40 obscure leagues, so at a 30-minute cadence each of those leagues came
+# round every ~4 hours -- comfortably past 180 minutes. Every single wide-list
+# line therefore failed the floor, returned no baseline, and was skipped in
+# silence. Only the core leagues, polled every cycle, could still be measured.
+#
+# It was invisible for two reasons. The rotation used to run on a 5-minute
+# cadence, where the same walk takes 40 minutes and fits easily; and after the
+# cadence moved to 30 minutes the database still held dense history from the
+# fast era, so baselines kept resolving. The v5 restart wiped that history and
+# the breakage became total: one movement in seventeen hours.
+#
+# The fix is NOT to pick a bigger number here and hope. Two things now hold it
+# together, and both matter:
+#
+#   * this is a FLOOR, not the whole rule. detector.py stretches it at runtime
+#     to at least one full rotation lap plus a cycle, measured from the list
+#     the sweep is actually walking (odds_client records it every cycle). A
+#     line can then never expire before it comes round again, whatever the
+#     list size, cadence or slot split happen to be. The cost is honest and
+#     bounded: a rarely-polled league is measured at its own coarser
+#     resolution rather than not at all.
+#   * the horizon filter below drops leagues with no fixture we could publish,
+#     which shortens the lap so the stretch is rarely needed.
+BASELINE_MAX_AGE_MINUTES = int(os.getenv("BASELINE_MAX_AGE_MINUTES", "150"))
+
+# Hard ceiling on that stretch. Past this a "move" is slow multi-day drift and
+# calling it informed money would be a lie, so we would rather be blind and say
+# so in the log than publish a signal we cannot stand behind.
+BASELINE_ABSOLUTE_MAX_MINUTES = int(os.getenv("BASELINE_ABSOLUTE_MAX_MINUTES", "240"))
 
 # A line drifting by at least this much counts as "this bookmaker moved too"
 # when scoring how broad a move is (see analytics._stars). Deliberately far
@@ -193,7 +230,32 @@ ROTATE_WIDE_COVERAGE = os.getenv("ROTATE_WIDE_COVERAGE", "1") not in ("0", "fals
 # the budget. Without a reservation, a busy tennis week fills every slot with
 # famous tournaments and the tracker silently reverts to watching only the
 # efficient markets -- the exact failure the wide sweep exists to fix.
+#
+# 2026-08-09: the reservation was never the problem, the WALK LENGTH was --
+# five slots over ~40 wide keys is a lap every eight cycles, four hours at this
+# cadence, and nothing on that list could be diffed against an hour-old price.
+# Deliberately NOT raised to paper over it: taking slots from core would starve
+# tennis, which is the one segment the ledger showed actually working (19 of 19
+# graded, +5.1% CLV). The lap is shortened by dropping dormant leagues instead,
+# and whatever lap remains is covered by stretching the baseline rail to match.
 WIDE_MIN_SLOTS = int(os.getenv("WIDE_MIN_SLOTS", "5"))
+
+# Skip leagues whose next fixture is beyond the publishing horizon.
+#
+# Two things pay for this. It stops us buying prices we could not publish even
+# if they moved -- MAX_LEAD_HOURS means a match five days out is not a signal,
+# and the one movement found during the blind day was exactly that, a fixture
+# on 14.08 caught on 09.08. And by dropping dormant leagues from the walk it
+# shortens the lap, which is what makes the baseline resolvable at all.
+#
+# The nearest fixture per sport is recorded from the previous fetch, so this
+# costs nothing extra: a league we have never fetched is always tried once.
+SKIP_DORMANT_SPORTS = os.getenv("SKIP_DORMANT_SPORTS", "1") not in ("0", "false", "False")
+
+# Margin on top of MAX_LEAD_HOURS, so a league enters the rotation a little
+# before its fixtures become publishable and a baseline already exists by the
+# time the first move matters.
+DORMANT_MARGIN_HOURS = float(os.getenv("DORMANT_MARGIN_HOURS", "12"))
 
 # GET /v4/sports/ is documented as free but is NOT -- production logs show it
 # billing 1 credit per call ("used=1454 remaining=18546 (call: /v4/sports/)").

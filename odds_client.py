@@ -35,6 +35,10 @@ from config import (
     ROTATE_WIDE_COVERAGE,
     WIDE_MIN_SLOTS,
     SPORTS_LIST_TTL_MINUTES,
+    SKIP_DORMANT_SPORTS,
+    DORMANT_MARGIN_HOURS,
+    MAX_LEAD_HOURS,
+    POLL_INTERVAL_MINUTES,
 )
 
 
@@ -172,8 +176,50 @@ def select_sport_keys(all_sports: list = None) -> list:
     # Imported here rather than at module scope: storage imports config, and a
     # top-level import would make the two modules circular at startup.
     import storage
+    wide = _drop_dormant(wide, storage.sport_horizon())
+    wide_slots = min(wide_slots, len(wide))
+    if not wide_slots:
+        return kept_core
+    # Record how long a full lap of the wide list now takes. detector.py reads
+    # this and refuses to let a baseline expire sooner -- the two numbers were
+    # set independently before, contradicted each other, and the result was a
+    # day of silence with nothing anywhere saying why.
+    import math
+    lap = math.ceil(len(wide) / max(1, wide_slots)) * max(1, POLL_INTERVAL_MINUTES)
+    storage.set_meta("wide_lap_minutes", str(lap))
+
     start = storage.next_rotation_offset(wide_slots, len(wide))
     return kept_core + [wide[(start + i) % len(wide)] for i in range(wide_slots)]
+
+
+def _drop_dormant(wide: list, horizon: dict) -> list:
+    """Leagues with nothing inside the publishing horizon leave the rotation.
+
+    The lap length is the whole ball game. A wide list of forty keys read five
+    at a time is a four-hour lap, and a line revisited every four hours cannot
+    be compared against an hour-old price -- so it is never measured at all,
+    which is precisely how the tracker went a full day without a signal on
+    2026-08-09. Dropping dormant leagues shortens the lap directly, and costs
+    nothing: the nearest fixture per key was already recorded on the last fetch.
+
+    A key we have never fetched has no horizon recorded and is always kept. The
+    filter must never be able to exclude a league it has not looked at, or a
+    cold start would lock itself out permanently.
+    """
+    if not SKIP_DORMANT_SPORTS or not horizon:
+        return wide
+    cutoff = (datetime.now(timezone.utc)
+              + timedelta(hours=MAX_LEAD_HOURS + DORMANT_MARGIN_HOURS)).isoformat()
+    kept = [k for k in wide
+            if not (horizon.get(k) or {}).get("next")
+            or str(horizon[k]["next"]) <= cutoff]
+    dropped = len(wide) - len(kept)
+    if dropped:
+        print(f"[coverage] {dropped} of {len(wide)} wide leagues have nothing within "
+              f"{MAX_LEAD_HOURS + DORMANT_MARGIN_HOURS:g}h -- skipped, lap gets shorter")
+    # Never return an empty rotation: if every league looked dormant we would
+    # stop refreshing the horizons that say so, and the filter would latch shut.
+    return kept or wide
 
 
 def fetch_odds_for_sport(sport_key: str, on_error=None) -> list:

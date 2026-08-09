@@ -188,6 +188,35 @@ def _left_words(seconds: float) -> str:
     return f"через {days} {_plural(days, 'день', 'дня', 'дней')} {hours} ч"
 
 
+def _detect_line() -> str:
+    """One line saying how much of the market we could actually MEASURE.
+
+    The funnel below explains what happened to movements once they were found.
+    It has nothing to say when the fault is upstream -- and on 2026-08-09 it
+    was: a scheduling bug meant most lines had no price to be compared against,
+    every counter downstream read zero, and the page reported a calm market for
+    a full day. This is the number that makes that visible instead.
+    """
+    try:
+        d = json.loads(storage.get_meta("detect_diag") or "{}")
+    except (ValueError, TypeError):
+        return ""
+    lines = d.get("lines") or 0
+    if not lines:
+        return ""
+    blind = d.get("no_history") or 0
+    pct = blind / lines * 100
+    tone = "warn" if pct >= 50 else ""
+    tail = ""
+    if pct >= 50:
+        tail = (" — столько линий мы видим впервые или слишком давно, "
+                "сравнивать не с чем. Пока эта доля высокая, сигналов "
+                "будет мало не потому, что рынок спокоен.")
+    return (f"<p class='detect {tone}'>В последнем срезе сверено "
+            f"<b>{lines - blind}</b> из <b>{lines}</b> линий "
+            f"(сравнение с ценой не старше {d.get('max_age', '?')} мин){tail}</p>")
+
+
 def _funnel_block(f: dict, span: str) -> str:
     """Where the day's market moves went.
 
@@ -215,7 +244,8 @@ def _funnel_block(f: dict, span: str) -> str:
         f"<li><span>не ставили: {label}</span><b>{n}</b></li>" for label, n in parts if n
     )
     return (
-        f"<div class='funnel'><div class='fn-head'>Движения за {span}</div>"
+        _detect_line()
+        + f"<div class='funnel'><div class='fn-head'>Движения за {span}</div>"
         f"<ul><li class='fn-top'><span>Всего поймали движений</span><b>{total}</b></li>"
         f"{rows}"
         f"<li class='fn-ok'><span>Из них поставили</span><b>{f.get('signals') or 0}</b></li>"
@@ -1293,6 +1323,10 @@ body::after{
 .funnel li.fn-top b{color:var(--mag)}
 .funnel li.fn-ok{border-top:1px solid var(--line);padding-top:8px}
 .funnel li.fn-ok b{color:var(--lime);font-size:19px}
+.detect{margin:14px 0 0;font-size:12.5px;line-height:1.55;color:var(--ink2)}
+.detect b{font-family:var(--mono);color:var(--ink)}
+.detect.warn{background:rgba(255,45,149,.08);border:1px solid rgba(255,45,149,.35);
+  border-radius:12px;padding:11px 13px;color:var(--ink)}
 .stat.lead b{font-size:26px}
 .clv-good{color:var(--lime)}
 .clv-bad{color:var(--mag)}

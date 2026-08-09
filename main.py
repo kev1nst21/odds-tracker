@@ -11,6 +11,7 @@ from config import (
     ODDSPAPI_LOOKUP_TTL_HOURS,
     POLL_INTERVAL_MINUTES,
     SNAPSHOT_RETENTION_HOURS,
+    BASELINE_MAX_AGE_MINUTES,
 )
 import odds_client
 import oddspapi_client
@@ -96,6 +97,9 @@ def run_once():
     summaries = analytics.build_event_summaries(records, spikes, movements)
 
     storage.save_snapshot(records, fetched_at)
+    # Which leagues have something coming up, so the next lap can skip the
+    # dormant ones and stay short enough for baselines to resolve.
+    storage.save_sport_horizon(records, fetched_at)
 
     # Record the bets we're actually recommending, with all three prices, so
     # results.py can score them later against the price a real bet would have
@@ -145,6 +149,24 @@ def run_once():
     # because "0 сигналов" on its own is indistinguishable from a broken
     # pipeline, and the only way to tune a filter honestly is to see how many
     # events each one is actually eating.
+    # BEFORE the funnel, because the funnel only describes what happened to
+    # movements that were found -- and on 2026-08-09 the fault was that almost
+    # none were. A line with no usable baseline is skipped in silence, so this
+    # is the only place that failure can ever be seen. If "не с чем сравнить"
+    # is most of the lines, nothing downstream means anything.
+    d = detector.LAST_DIAG
+    storage.set_meta("detect_diag", json.dumps(d))
+    if d.get("lines"):
+        blind_pct = d["no_history"] / d["lines"] * 100
+        print(f"[detect] линий {d['lines']} → сравнили {d['compared']} "
+              f"→ дрогнуло {d['moved']} → от порога {d['spiked']}; "
+              f"не с чем сравнить {d['no_history']} ({blind_pct:.0f}%)")
+        if blind_pct >= 50:
+            worst = sorted(d["by_sport_blind"].items(), key=lambda kv: -kv[1])[:5]
+            print("[detect] ВНИМАНИЕ: половина линий без базы — ротация длиннее "
+                  f"окна сравнения ({BASELINE_MAX_AGE_MINUTES} мин). Хуже всего: "
+                  + ", ".join(f"{k} ({n})" for k, n in worst))
+
     f = analytics.LAST_FUNNEL
     storage.save_funnel(f, fetched_at)
     print(f"[funnel] событий {f.get('events',0)} → просело {f.get('with_drop',0)} → "

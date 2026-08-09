@@ -14,6 +14,7 @@ asset this product has -- so new columns now arrive through _migrate() below
 and the history survives. If a change ever genuinely invalidates past rows,
 bump DB_PATH deliberately and say so on the site; don't do it by accident.
 """
+import json
 import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -822,6 +823,37 @@ def breakdown_stats(kind: str = "prematch"):
     return {"by_sport": finish(by_sport), "by_drop": finish(by_drop),
             "by_stars": finish(by_stars), "graded": len(rows),
             "stake": FLAT_STAKE}
+
+
+def save_sport_horizon(records, at: str):
+    """Remember the nearest fixture we saw for each sport key.
+
+    Cheap bookkeeping with an outsized payoff: it lets the rotation skip
+    leagues that have nothing coming up, which both saves credits and -- far
+    more importantly -- shortens the rotation lap so the remaining leagues are
+    revisited often enough to be diffable at all.
+    """
+    nearest = {}
+    for r in records:
+        key, start = r.get("sport_key"), r.get("start_time")
+        if not key or not start:
+            continue
+        cur = nearest.get(key)
+        if cur is None or str(start) < cur:
+            nearest[key] = str(start)
+    if not nearest:
+        return
+    existing = json.loads(get_meta("sport_horizon") or "{}")
+    existing.update({k: {"next": v, "seen": at} for k, v in nearest.items()})
+    set_meta("sport_horizon", json.dumps(existing))
+
+
+def sport_horizon() -> dict:
+    """{sport_key: {"next": iso, "seen": iso}} from the last time each was fetched."""
+    try:
+        return json.loads(get_meta("sport_horizon") or "{}")
+    except (ValueError, TypeError):
+        return {}
 
 
 def counterfactual_stats():
