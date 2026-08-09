@@ -120,6 +120,7 @@ jobs:
           python test_smoke.py
           python test_selection.py
           python test_grading.py
+          python test_baseline_gap.py
 
       - name: Poll the market for this window
         env:
