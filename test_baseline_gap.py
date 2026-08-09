@@ -160,3 +160,35 @@ block = dashboard._funnel_block(
      "low_stars": 0, "off_band": 0, "too_far": 0, "signals": 1}, "24 часа")
 assert "сверено" in block, "the funnel lost the detection line"
 print("page ok: строка сверки стоит над воронкой")
+
+# --- 7. events beyond the publishing horizon must never enter at all ---------
+# Requested 2026-08-09: "ты мониторишь события которые будут позже чем 60
+# часов, а их быть нигде не должно". They cannot become signals under our own
+# MAX_LEAD_HOURS rule, yet they were stored, diffed and counted -- padding the
+# "сверено N из M" denominator and diluting the rotation with fixtures we would
+# refuse to publish anyway.
+import oddspapi_client  # noqa: E402
+
+edge = config.MAX_LEAD_HOURS + config.DORMANT_MARGIN_HOURS
+for fn, label in ((odds_client._is_prematch, "TheOddsAPI"),
+                  (oddspapi_client._is_prematch, "OddsPapi")):
+    soon_iso = (now + timedelta(hours=6)).isoformat()
+    inside = (now + timedelta(hours=edge - 6)).isoformat()
+    beyond = (now + timedelta(hours=edge + 6)).isoformat()
+    started = (now - timedelta(minutes=30)).isoformat()
+    assert fn(soon_iso), f"{label}: близкий матч отброшен"
+    assert fn(inside), f"{label}: матч внутри горизонта отброшен"
+    assert not fn(beyond), f"{label}: матч за горизонтом всё ещё берётся"
+    assert not fn(started), f"{label}: начавшийся матч всё ещё берётся"
+print(f"горизонт ok: оба провайдера берут только окно от старта до {edge:g} ч вперёд")
+
+# and the whole flattening path must honour it, not just the predicate
+raw = [{
+    "id": "far1", "sport_key": "soccer_epl", "sport_title": "EPL",
+    "commence_time": (now + timedelta(days=9)).isoformat().replace("+00:00", "Z"),
+    "home_team": "A", "away_team": "B",
+    "bookmakers": [{"key": "pinnacle", "markets": [{"key": "h2h", "outcomes": [
+        {"name": "A", "price": 2.5}, {"name": "B", "price": 2.6}]}]}],
+}]
+assert odds_client.flatten_odds(raw) == [], "далёкий матч всё равно попал в записи"
+print("горизонт ok: далёкий матч не доходит даже до записей — ни в базу, ни в счётчики")

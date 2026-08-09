@@ -279,9 +279,29 @@ def _side_for_outcome(name: str, home_team: str, away_team: str):
 
 
 def _is_prematch(commence_time, now=None) -> bool:
-    """True if the event hasn't started yet (plus a small buffer). Anything
-    already under way is in-play: its prices react to goals and breaks of
-    serve, not to money, so it can only produce false signals."""
+    """True if the event is worth storing: not started, and not so far away
+    that we could never publish it.
+
+    The near edge was always here -- an in-play price reacts to goals and
+    breaks of serve, not to money, so it can only produce false signals.
+
+    The FAR edge was added 2026-08-09 on the user's observation: "ты мониторишь
+    события которые будут позже чем 60 часов, а их быть нигде не должно". He is
+    right, and it was worse than untidy. MAX_LEAD_HOURS already refuses to
+    publish those events, so every line we kept for a match a week out was
+    stored, diffed and counted -- padding the "сверено N из M" denominator,
+    bloating the snapshot table and the CI cache, and diluting the rotation
+    with fixtures that cannot become a signal under our own rules. One of the
+    only two movements found during the blind day was exactly this: a match on
+    14.08 caught on 09.08, unpublishable the moment it was found.
+
+    Note what this does and does not save. The Odds API bills per SPORT KEY,
+    not per event, so dropping distant events costs nothing extra and saves no
+    credit directly. It pays indirectly and steadily: a league whose fixtures
+    are all beyond the horizon now yields no usable records, which is what
+    marks it dormant, and dormant leagues leave the rotation -- and THAT is
+    what shortens the lap and cuts the bill.
+    """
     if not PREMATCH_ONLY:
         return True
     if not commence_time:
@@ -293,7 +313,27 @@ def _is_prematch(commence_time, now=None) -> bool:
     if start.tzinfo is None:
         start = start.replace(tzinfo=timezone.utc)
     now = now or datetime.now(timezone.utc)
-    return start > now + timedelta(minutes=PREMATCH_BUFFER_MINUTES)
+    if start <= now + timedelta(minutes=PREMATCH_BUFFER_MINUTES):
+        return False
+    # The margin matches the rotation's: a fixture enters the window slightly
+    # before it becomes publishable, so a baseline already exists by the time
+    # the first move on it would matter.
+    return start <= now + timedelta(hours=MAX_LEAD_HOURS + DORMANT_MARGIN_HOURS)
+
+
+def _already_started(commence_time, now=None) -> bool:
+    """Distinguishes the two ways an event fails _is_prematch, so the log can
+    say which one happened rather than blaming everything on in-play."""
+    if not commence_time:
+        return False
+    try:
+        start = datetime.fromisoformat(str(commence_time).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return start <= now + timedelta(minutes=PREMATCH_BUFFER_MINUTES)
 
 
 def flatten_odds(raw_events: list) -> list:
@@ -313,12 +353,18 @@ def flatten_odds(raw_events: list) -> list:
 
 def _flatten(raw_events: list) -> list:
     records = []
-    skipped_live = 0
+    skipped_live = skipped_far = 0
     for event in raw_events:
         fixture_id = event.get("id")
         start_time = event.get("commence_time")
         if not _is_prematch(start_time):
-            skipped_live += 1
+            # Two different reasons, counted apart: one says the market is
+            # already live, the other says we would never publish this match.
+            # Lumping them together once made a horizon skip read as "in-play".
+            if _already_started(start_time):
+                skipped_live += 1
+            else:
+                skipped_far += 1
             continue
         home_team = event.get("home_team")
         away_team = event.get("away_team")
@@ -352,4 +398,7 @@ def _flatten(raw_events: list) -> list:
                     })
     if skipped_live:
         print(f"[odds_client] skipped {skipped_live} in-play event(s) -- pre-match only")
+    if skipped_far:
+        print(f"[odds_client] skipped {skipped_far} event(s) beyond the "
+              f"{MAX_LEAD_HOURS + DORMANT_MARGIN_HOURS:g}h horizon -- unpublishable anyway")
     return records

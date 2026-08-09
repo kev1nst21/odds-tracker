@@ -39,6 +39,8 @@ from config import (
     ODDSPAPI_BOOKMAKERS,
     PREMATCH_ONLY,
     PREMATCH_BUFFER_MINUTES,
+    MAX_LEAD_HOURS,
+    DORMANT_MARGIN_HOURS,
 )
 
 
@@ -243,7 +245,25 @@ def _is_prematch(start_time, now=None) -> bool:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     now = now or datetime.now(timezone.utc)
-    return dt > now + timedelta(minutes=PREMATCH_BUFFER_MINUTES)
+    if dt <= now + timedelta(minutes=PREMATCH_BUFFER_MINUTES):
+        return False
+    # Same far edge as the other provider -- see the long note in
+    # odds_client._is_prematch. A fixture we would never publish should not be
+    # stored, diffed or counted anywhere.
+    return dt <= now + timedelta(hours=MAX_LEAD_HOURS + DORMANT_MARGIN_HOURS)
+
+
+def _already_started(start_time, now=None) -> bool:
+    if not start_time:
+        return False
+    try:
+        dt = datetime.fromisoformat(str(start_time).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return dt <= now + timedelta(minutes=PREMATCH_BUFFER_MINUTES)
 
 
 def flatten_odds(fixtures: list, names_by_sport: dict, sport_keys: dict = None) -> list:
@@ -259,11 +279,14 @@ def flatten_odds(fixtures: list, names_by_sport: dict, sport_keys: dict = None) 
 def _flatten(fixtures, names_by_sport, sport_keys=None):
     sport_keys = sport_keys or ODDSPAPI_SPORTS
     records = []
-    skipped_live = 0
+    skipped_live = skipped_far = 0
     for fx in fixtures:
         start_time = fx.get("startTime")
         if not _is_prematch(start_time):
-            skipped_live += 1
+            if _already_started(start_time):
+                skipped_live += 1
+            else:
+                skipped_far += 1
             continue
 
         sport_id = fx.get("sportId")
@@ -307,6 +330,9 @@ def _flatten(fixtures, names_by_sport, sport_keys=None):
                     break  # one price per outcome; alt lines are skipped above
     if skipped_live:
         print(f"[oddspapi] skipped {skipped_live} in-play fixture(s) -- pre-match only")
+    if skipped_far:
+        print(f"[oddspapi] skipped {skipped_far} fixture(s) beyond the "
+              f"{MAX_LEAD_HOURS + DORMANT_MARGIN_HOURS:g}h horizon")
     return records
 
 
