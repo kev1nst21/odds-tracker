@@ -24,6 +24,7 @@ from config import (
     RESULTS_CHECK_INTERVAL_HOURS,
     ODDSPAPI_SPORT_KEYS,
     LIVE_SCORE_MAX_SPORTS,
+    LIVE_SCORE_MIN_INTERVAL_MINUTES,
     ODDSPAPI_SETTLEMENTS_PER_CYCLE,
     RESULT_GIVE_UP_HOURS,
 )
@@ -272,9 +273,22 @@ def refresh_live_scores(now: datetime = None) -> int:
     sweeping the whole card.
     """
     now = now or datetime.now(timezone.utc)
+
+    # Clock-throttled, not cycle-throttled. See LIVE_SCORE_MIN_INTERVAL_MINUTES:
+    # tying this to the cycle made a faster cadence cost proportionally more
+    # for a number that is only ever read, never acted on.
+    last = storage.get_meta("last_live_scores_at")
+    if last:
+        try:
+            if (now - datetime.fromisoformat(last)) < timedelta(minutes=LIVE_SCORE_MIN_INTERVAL_MINUTES):
+                return 0
+        except ValueError:
+            pass
+
     rows = storage.inplay_fixtures(now.isoformat())
     if not rows:
         return 0
+    storage.set_meta("last_live_scores_at", now.isoformat())
 
     wanted = {}
     for r in rows:

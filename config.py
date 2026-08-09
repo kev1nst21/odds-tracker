@@ -380,6 +380,17 @@ ODDSPAPI_SPORT_KEYS = {"esports_cs2", "esports_dota2", "esports_lol", "table_ten
 # turning into a burst of requests after an outage.
 ODDSPAPI_SETTLEMENTS_PER_CYCLE = int(os.getenv("ODDSPAPI_SETTLEMENTS_PER_CYCLE", "12"))
 
+# Live scores are for READING, not for deciding anything, so they do not need
+# to keep pace with the poll.
+#
+# 2026-08-09: found while checking why a cycle cost 13 credits instead of the
+# 10 the odds calls account for. Live scores ran once per CYCLE, capped at two
+# sports -- fine at half-hourly polling, but the moment the cadence tripled so
+# did this, purely to redraw a number nobody acts on. Throttling it by the
+# clock instead means the displayed score is at most this stale while the cost
+# stops scaling with how fast we poll.
+LIVE_SCORE_MIN_INTERVAL_MINUTES = int(os.getenv("LIVE_SCORE_MIN_INTERVAL_MINUTES", "30"))
+
 # When to stop asking about a match and record that we could not check it.
 #
 # The Odds API scores endpoint only reaches three days back, so a bet missed
@@ -537,7 +548,11 @@ PUBLISH_INTERVAL_MINUTES = int(os.getenv("PUBLISH_INTERVAL_MINUTES")
 # below this. A 3-minute cadence burns credits ten times faster than a
 # 30-minute one, and running the account to zero mid-month would take the whole
 # product offline -- much worse than a few missed cycles.
-QUOTA_RESERVE_CREDITS = int(os.getenv("QUOTA_RESERVE_CREDITS", "1500"))
+# 2026-08-09: lowered from 1500. The reserve exists so the account never hits
+# zero mid-month and loses the ability to grade results -- but at 1500 it was
+# holding back a fifth of the remaining budget, which at the current burn is
+# several days of coverage. 800 still leaves room to settle every open bet.
+QUOTA_RESERVE_CREDITS = int(os.getenv("QUOTA_RESERVE_CREDITS", "800"))
 
 # --- Strategy split (user decision, 2026-07-29) ----------------------------
 # Every signal is logged once and then counted under BOTH headings, so the two
