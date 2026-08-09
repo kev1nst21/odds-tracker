@@ -25,6 +25,9 @@ from config import (
     FLAT_STAKE,
     OPTIMAL_MAX_PRICE,
     SNAPSHOT_RETENTION_HOURS,
+    ENTRY_MIN_GAP_PCT,
+    ENTRY_MIN_CAPTURE_PCT,
+    ENTRY_MAX_OVER_OLD_PCT,
 )
 
 SCHEMA = """
@@ -198,6 +201,17 @@ _MIGRATIONS = {
         # counted off deduplicated rows instead of summed per poll -- see
         # funnel_stats() for why the old sum double-counted.
         "bucket": "TEXT",
+        # The best price still on offer when we REFUSED the entry.
+        #
+        # Added 2026-08-09 because a question could not be answered without it.
+        # The single biggest killer of signals is ENTRY_MIN_CAPTURE_PCT -- the
+        # entry has to give back at least half the drop, or we would be
+        # announcing "было 3.20" and sending you to bet 2.40. Reasonable rule,
+        # but is 50% the right number? To know what a 40% or 30% threshold
+        # would have produced, you need the price that was actually available
+        # and got refused. We never stored it, so every rejected move was
+        # unrecoverable and the threshold was unfalsifiable.
+        "best_left_price": "REAL",
     },
     "tracked_alerts": {
         # 'aggressive' | 'optimal' -- which strategy bucket this signal falls
@@ -267,8 +281,9 @@ def save_movement(summary: dict, detected_at: str) -> bool:
             INSERT OR IGNORE INTO movements
                 (detected_at, fixture_id, sport_key, start_time, home_team, away_team,
                  outcome_id, outcome_name, stars, old_price, new_price, drop_pct,
-                 down_count, books_count, had_entry, entry_price, was_signal, bucket)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 down_count, books_count, had_entry, entry_price, was_signal, bucket,
+                 best_left_price)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (detected_at, summary["fixture_id"], summary.get("sport_key"),
              summary.get("start_time"), summary.get("home_team"), summary.get("away_team"),
@@ -276,7 +291,8 @@ def save_movement(summary: dict, detected_at: str) -> bool:
              bet.get("old_price"), bet.get("new_price"), bet.get("drop_pct"),
              bet.get("down_count"), bet.get("books_count"),
              1 if summary.get("has_entry") else 0, bet.get("entry_price"),
-             1 if summary.get("alertable") else 0, summary.get("funnel_bucket")),
+             1 if summary.get("alertable") else 0, summary.get("funnel_bucket"),
+             bet.get("best_left_price")),
         )
         conn.commit()
         return cur.rowcount > 0
@@ -882,6 +898,57 @@ def counterfactual_stats():
             "FROM movements WHERE resolved=1 AND result IN ('hit','miss') "
             "  AND entry_price IS NOT NULL"
         ).fetchall()
+    return _score_rules(rows)
+
+
+def capture_threshold_preview(pct_options=(50, 40, 30)):
+    """How many MORE signals a softer entry rule would have produced.
+
+    The entry has to give back at least ENTRY_MIN_CAPTURE_PCT of the drop, and
+    that single rule is currently the biggest killer of signals -- most refused
+    moves die there rather than on stars, price band or horizon. The rule is
+    sound: without it we would announce "было 3.20" and send you to bet 2.40.
+    The open question is whether half is the right share.
+
+    This answers it from the ledger instead of by taste, by replaying the same
+    floor arithmetic against the best price that was ACTUALLY still on offer
+    when we said no. Counts only -- deliberately not money, because a bet we
+    never made has no result, and pretending otherwise is how a loosened filter
+    gets justified by a number it invented.
+
+    Movements logged before 2026-08-09 have no stored refused price and are
+    excluded rather than guessed at; `sample` says how many rows the answer
+    actually rests on.
+    """
+    with _conn() as conn:
+        rows = conn.execute(
+            # Only moves refused BY THIS RULE. A move blocked for too few stars
+            # or a price outside the band would still be blocked after
+            # loosening the capture threshold, so counting it here would credit
+            # the change with signals it does not produce -- exactly the kind of
+            # flattering arithmetic this preview exists to prevent.
+            "SELECT old_price, new_price, best_left_price "
+            "FROM movements "
+            "WHERE best_left_price IS NOT NULL AND old_price IS NOT NULL "
+            "  AND new_price IS NOT NULL AND was_signal=0 "
+            "  AND bucket='entry_too_low'"
+        ).fetchall()
+
+    out = []
+    for pct in pct_options:
+        extra = 0
+        for r in rows:
+            old, new, best = r["old_price"], r["new_price"], r["best_left_price"]
+            floor = max(new * (1 + ENTRY_MIN_GAP_PCT / 100.0),
+                        new + (old - new) * (pct / 100.0))
+            ceiling = old * (1 + ENTRY_MAX_OVER_OLD_PCT / 100.0)
+            if floor <= best <= ceiling:
+                extra += 1
+        out.append({"capture_pct": pct, "extra_signals": extra})
+    return {"rules": out, "sample": len(rows)}
+
+
+def _score_rules(rows):
 
     def drop_of(r):
         if not r["old_price"] or not r["new_price"]:

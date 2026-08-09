@@ -117,3 +117,49 @@ block = dashboard._funnel_block(
 for needle in ("звёзд", "вне полосы", "дальше"):
     assert needle in block, f"funnel does not explain «{needle}»: {block[:400]}"
 print("воронка ok: новые причины отсева названы человеческим языком")
+
+# --- the entry threshold must be falsifiable ---------------------------------
+# ENTRY_MIN_CAPTURE_PCT is the single biggest killer of signals: most refused
+# moves die there, not on stars, price band or horizon. The rule is sound --
+# without it we would announce "было 3.20" and send someone to bet 2.40 -- but
+# whether HALF is the right share was unanswerable, because the price we
+# refused was never stored. Now it is, and a softer threshold can be scored
+# instead of argued about.
+storage.init_db()
+
+
+def refused(fid, old, new, best):
+    """A move where a price WAS still on offer but did not clear the floor."""
+    return {
+        "fixture_id": fid, "sport_key": "soccer_x",
+        "start_time": (now + timedelta(hours=5)).isoformat(),
+        "home_team": "A", "away_team": "B", "stars": 3,
+        "has_entry": False, "alertable": False, "strategy": "aggressive",
+        "funnel_bucket": "entry_too_low",
+        "bet": {"side": "home", "name": "A", "old_price": old, "new_price": new,
+                "drop_pct": (old - new) / old * 100, "down_count": 4,
+                "books_count": 9, "entry_price": None, "entry_book": None,
+                "best_left_price": best, "market_id": "h2h", "player_key": "-"},
+        "optimal": None,
+    }
+
+
+# drop 4.00 -> 3.00. Floors: 50% needs 3.50, 40% needs 3.40, 30% needs 3.30.
+storage.save_movement(refused("c1", 4.00, 3.00, 3.35), now.isoformat())  # only 30% takes it
+storage.save_movement(refused("c2", 4.00, 3.00, 3.45), now.isoformat())  # 40% and 30%
+storage.save_movement(refused("c3", 4.00, 3.00, 3.10), now.isoformat())  # nobody takes it
+
+prev = storage.capture_threshold_preview((50, 40, 30))
+by = {r["capture_pct"]: r["extra_signals"] for r in prev["rules"]}
+assert prev["sample"] == 3, prev
+assert by[50] == 0, by      # these were refused under the live rule by construction
+assert by[40] == 1, by      # 3.45 clears a 40% floor
+assert by[30] == 2, by      # 3.35 and 3.45 clear a 30% floor
+print(f"порог входа ok: смягчение до 40% дало бы +{by[40]}, до 30% +{by[30]} "
+      f"на выборке из {prev['sample']} отказов")
+
+# and the refused price must actually survive the round-trip, or the whole
+# preview is computed from nothing
+row = [r for r in storage.recent_movements(10) if r["fixture_id"] == "c2"][0]
+assert row["had_entry"] == 0 and row["was_signal"] == 0, dict(row)
+print("порог входа ok: отказ записан вместе с ценой, которую мы отвергли")
