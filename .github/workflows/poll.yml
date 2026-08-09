@@ -136,10 +136,11 @@ jobs:
           # users one threshold while the code alerted on another.
           SPIKE_THRESHOLD_PCT: "0.10"
           RESULTS_CHECK_INTERVAL_HOURS: "3"
-          # Deliberately NOT setting POLL_INTERVAL_MINUTES: setting it here
-          # would override cadence.json and reintroduce exactly the drift
-          # between advertised and actual cadence that this design removes.
-          PUBLISH_INTERVAL_MINUTES: "30"
+          # Deliberately NOT setting POLL_INTERVAL_MINUTES or
+          # PUBLISH_INTERVAL_MINUTES: both now come from cadence.json, so that
+          # file stays the single lever. Pinning the publish interval here was
+          # what made a 20-minute cadence come out as an uneven 20/10 sawtooth,
+          # because the run window still spanned 30 minutes.
         run: python runner.py
 
       # Publish the freshly-rendered dashboard/index.html to GitHub Pages.
@@ -174,10 +175,12 @@ jobs:
       # :00/:30 by itself instead of drifting.
       - name: Hold until the next polling window opens
         if: always()
-        env:
-          PUBLISH_INTERVAL_MINUTES: "30"
         run: |
-          period=$(( PUBLISH_INTERVAL_MINUTES * 60 ))
+          # Read the cadence from the same file everything else reads, so a
+          # change there cannot leave the pacing behind on an old number.
+          mins=$(python -c "from config import PUBLISH_INTERVAL_MINUTES as m; print(m)")
+          echo "cadence.json says ${mins} min per window"
+          period=$(( mins * 60 ))
           now=$(date -u +%s)
           # A small lead, so the successor is booting as the window opens
           # rather than a minute into it.
