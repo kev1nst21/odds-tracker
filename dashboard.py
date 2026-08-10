@@ -1165,6 +1165,14 @@ def _last_bets(bets, limit: int = 10) -> str:
     return "<div class='last5'>" + "".join(items) + "</div>"
 
 
+def _detect_diag() -> dict:
+    """The last poll's measurement coverage, as stored by main.py."""
+    try:
+        return json.loads(storage.get_meta("detect_diag") or "{}")
+    except (ValueError, TypeError):
+        return {}
+
+
 def _write_ledger(agg: dict) -> None:
     """Dump every logged signal next to index.html as plain JSON.
 
@@ -1181,6 +1189,15 @@ def _write_ledger(agg: dict) -> None:
         "threshold_pct": SPIKE_THRESHOLD_PCT * 100,
         "optimal_max_price": OPTIMAL_MAX_PRICE,
         "flat_stake": agg.get("stake"),
+        # The funnel and the entry-threshold preview travel WITH the ledger on
+        # purpose. Both were previously computable only inside the poll job, so
+        # answering "where did the signals go" or "what would a 40% threshold
+        # give" meant reading a CI log by hand -- which turned out to be
+        # impossible on a day the browser was down. Numbers that decisions rest
+        # on belong in the published file, where anyone can recount them.
+        "funnel_24h": storage.funnel_stats(24),
+        "entry_threshold_preview": storage.capture_threshold_preview(),
+        "detect": _detect_diag(),
         "count": len(rows),
         "signals": rows,
     }

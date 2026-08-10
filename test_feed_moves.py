@@ -287,3 +287,21 @@ page3 = open(p3, encoding="utf-8").read()
 assert "$breakdown_block" not in page3 and "$counterfactual_block" not in page3, \
     "a template placeholder was left unsubstituted"
 print(f"страница ok: {len(page3)} байт, плейсхолдеров не осталось")
+
+# --- the ledger must carry the numbers decisions rest on ---------------------
+# Added 2026-08-10 after a check ran with the browser down: the funnel and the
+# entry-threshold preview existed only inside the poll job, so the one question
+# that mattered ("what would a 40% threshold give?") could not be answered
+# without reading a CI log by hand. Anything a decision depends on belongs in
+# the published file.
+import json as _json  # noqa: E402
+
+dashboard.render_dashboard([], quota={"remaining": 4321, "used": 9})
+led = _json.load(open(dashboard.LEDGER_PATH, encoding="utf-8"))
+for key in ("funnel_24h", "entry_threshold_preview", "detect", "signals"):
+    assert key in led, f"ledger.json is missing {key}: {list(led)}"
+prev = led["entry_threshold_preview"]
+assert "rules" in prev and "sample" in prev, prev
+assert {r["capture_pct"] for r in prev["rules"]} == {50, 40, 30}, prev
+print(f"ledger ok: воронка, охват и превью порога входа опубликованы "
+      f"(выборка {prev['sample']})")
