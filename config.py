@@ -216,7 +216,16 @@ WIDE_GROUPS = [g.strip() for g in
 # day. It was already spending 1.4x its income before any widening. Since
 # breadth is now worth more than frequency (see BASELINE_WINDOW_MINUTES), the
 # cap buys breadth and the cadence pays for it.
-MAX_SPORTS_PER_CYCLE = int(os.getenv("MAX_SPORTS_PER_CYCLE", "10"))
+# 2026-08-10, raised 10 -> 15 by user decision after the funnel finally read
+# clean and showed the real bottleneck. With every filter bucket at zero, the
+# scarcity of signals was not selectivity at all: of 380 lines watched, 108
+# twitched and only TWO cleared 10% in a poll -- one movement in 24 hours
+# across the whole market. We had built a careful mill and were feeding it a
+# handful of grain. Coverage is the one lever that adds signals without
+# touching what counts as one: same threshold, same stars, same price band,
+# just a bigger field. Costs credits linearly, which the user accepted
+# ("не бойся, мы если что докупим кредитов").
+MAX_SPORTS_PER_CYCLE = int(os.getenv("MAX_SPORTS_PER_CYCLE", "15"))
 
 # The wide list is bigger than one cycle's budget, so it is walked in slices:
 # each cycle takes the next MAX_SPORTS_PER_CYCLE - len(core) keys and the
@@ -238,7 +247,13 @@ ROTATE_WIDE_COVERAGE = os.getenv("ROTATE_WIDE_COVERAGE", "1") not in ("0", "fals
 # tennis, which is the one segment the ledger showed actually working (19 of 19
 # graded, +5.1% CLV). The lap is shortened by dropping dormant leagues instead,
 # and whatever lap remains is covered by stretching the baseline rail to match.
-WIDE_MIN_SLOTS = int(os.getenv("WIDE_MIN_SLOTS", "5"))
+# 2026-08-10, 5 -> 8 alongside the wider cycle. Two reasons, and the second is
+# not obvious: the wide list is where the informed money hides, so it should
+# take most of the new slots; and a longer slice means a SHORTER lap, which is
+# what keeps the baseline resolvable (see BASELINE_MAX_AGE_MINUTES for the day
+# this went wrong). Core still keeps 7 of the 15, so tennis -- the only segment
+# the ledger has shown working -- is not starved.
+WIDE_MIN_SLOTS = int(os.getenv("WIDE_MIN_SLOTS", "8"))
 
 # Skip leagues whose next fixture is beyond the publishing horizon.
 #
@@ -390,6 +405,16 @@ ODDSPAPI_SETTLEMENTS_PER_CYCLE = int(os.getenv("ODDSPAPI_SETTLEMENTS_PER_CYCLE",
 # clock instead means the displayed score is at most this stale while the cost
 # stops scaling with how fast we poll.
 LIVE_SCORE_MIN_INTERVAL_MINUTES = int(os.getenv("LIVE_SCORE_MIN_INTERVAL_MINUTES", "30"))
+
+# How often the bot sends a "still here, this is what the market did" digest,
+# even when there is nothing to bet.
+#
+# Requested 2026-08-10: "чтобы отчеты были в бота, а то сижу втыкаю". Until now
+# the bot only spoke when a signal fired, so a quiet market and a broken poller
+# were indistinguishable from the outside -- which is exactly the failure mode
+# that cost two days this week. A heartbeat with real numbers makes silence
+# informative instead of ambiguous.
+DIGEST_INTERVAL_HOURS = float(os.getenv("DIGEST_INTERVAL_HOURS", "3"))
 
 # When to stop asking about a match and record that we could not check it.
 #

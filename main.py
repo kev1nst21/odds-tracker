@@ -2,6 +2,7 @@
 build one summary per event -> notify -> update dashboard -> (periodically)
 check results. Run this once per interval (see README.md)."""
 import json
+import traceback
 from datetime import datetime, timedelta, timezone
 
 from config import (
@@ -12,6 +13,7 @@ from config import (
     POLL_INTERVAL_MINUTES,
     SNAPSHOT_RETENTION_HOURS,
     BASELINE_MAX_AGE_MINUTES,
+    DIGEST_INTERVAL_HOURS,
 )
 import odds_client
 import oddspapi_client
@@ -75,6 +77,74 @@ def _fetch_oddspapi(now):
     except Exception as exc:  # noqa: BLE001 -- second provider is best-effort
         print(f"[main] OddsPapi provider failed, continuing without it: {exc}")
         return []
+
+
+def _soonest(active) -> str:
+    """When the nearest open bet kicks off, in the same format the cards use."""
+    starts = sorted(r["start_time"] for r in active if r["start_time"])
+    if not starts:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(starts[0]).replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    return dt.strftime("%d.%m %H:%M UTC")
+
+
+def _maybe_digest(now, fetched_at):
+    """Send the periodic heartbeat, at most once per DIGEST_INTERVAL_HOURS.
+
+    Deliberately built from what is already in the database rather than from
+    this cycle's variables: the digest covers a window of several hours, and a
+    single poll is not that window. Any failure here is swallowed -- a report
+    that cannot be sent must never take the poll down with it.
+    """
+    if not DIGEST_INTERVAL_HOURS:
+        return
+    last = storage.get_meta("last_digest_at")
+    if last:
+        try:
+            if (now - datetime.fromisoformat(last)) < timedelta(hours=DIGEST_INTERVAL_HOURS):
+                return
+        except ValueError:
+            pass
+    try:
+        f = storage.funnel_stats(int(DIGEST_INTERVAL_HOURS))
+        diag = json.loads(storage.get_meta("detect_diag") or "{}")
+        active = storage.active_signals(60)
+        quota = odds_client.LAST_QUOTA or {}
+        remaining = quota.get("remaining")
+        payload = {
+            "hours": DIGEST_INTERVAL_HOURS,
+            "threshold": SPIKE_THRESHOLD_PCT * 100,
+            "lines_watched": diag.get("lines"),
+            "lines_blind": diag.get("no_history"),
+            "lines_moved": diag.get("moved"),
+            "movements": f.get("big_drop"),
+            "signals": f.get("signals"),
+            "thin_market": f.get("thin_market"),
+            "all_books_moved": f.get("all_books_moved"),
+            "entry_too_low": f.get("entry_too_low"),
+            "low_stars": f.get("low_stars"),
+            "off_band": f.get("off_band"),
+            "too_far": f.get("too_far"),
+            "open_bets": len(active),
+            "next_start": _soonest(active),
+            "credits": remaining,
+            "poll_minutes": POLL_INTERVAL_MINUTES,
+        }
+        if remaining:
+            burn = storage.get_meta("burn_per_day")
+            try:
+                payload["days_left"] = max(0, remaining - 800) / float(burn) if burn else None
+            except (TypeError, ValueError):
+                payload["days_left"] = None
+        notifier.notify_digest(payload, dashboard_url=DASHBOARD_URL)
+        storage.set_meta("last_digest_at", fetched_at)
+        print(f"[digest] sent: {payload['movements']} moves, {payload['signals']} signals")
+    except Exception:  # noqa: BLE001 -- a report must never break the poll
+        print("[digest] failed, continuing:")
+        traceback.print_exc()
 
 
 def run_once():
@@ -175,6 +245,8 @@ def run_once():
           f"{f.get('entry_too_low',0)} → сигналов {f.get('signals',0)}")
 
     path = dashboard.render_dashboard(summaries, quota=odds_client.LAST_QUOTA)
+
+    _maybe_digest(now, fetched_at)
 
     actionable = sum(1 for s in summaries if s.get("alertable"))
     starred = sum(1 for s in summaries if s.get("stars", 0) >= 3)

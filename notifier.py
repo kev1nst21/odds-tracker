@@ -189,6 +189,74 @@ def notify_summaries(summaries: list, max_events: int = 6, dashboard_url: str = 
     send_telegram_message(f"{header}\n\n{body}{footer}".replace("\n\n\n", "\n\n"))
 
 
+def notify_digest(d: dict, dashboard_url: str = None):
+    """The "still here, here is what the market did" heartbeat.
+
+    Requested 2026-08-10: "чтобы отчеты были в бота, а то сижу втыкаю". The bot
+    used to speak only when a signal fired, which meant a quiet market and a
+    dead poller produced exactly the same thing -- nothing. That ambiguity is
+    not theoretical: it is what let a 46-hour outage and then a full day of
+    detector blindness pass unnoticed this week.
+
+    So this reports the MEASUREMENT, not only the outcome. "Сверили 380 линий,
+    до порога дошли 2" is a claim that can be checked and argued with; silence
+    is not. When nothing fired it says so plainly instead of dressing the gap
+    up -- an empty market is a legitimate answer, a broken one is not, and
+    these numbers are what tells the two apart.
+    """
+    lines = [f"📊 <b>{BRAND} · сводка за {d.get('hours', 3):g} ч</b>"]
+
+    watched = d.get("lines_watched") or 0
+    if watched:
+        blind = d.get("lines_blind") or 0
+        moved = f", шевельнулось {d['lines_moved']}" if d.get("lines_moved") else ""
+        lines.append(f"Сверено <b>{watched - blind}</b> из <b>{watched}</b> "
+                     f"линий в последнем срезе{moved}")
+
+    lines.append("")
+    moves = d.get("movements") or 0
+    sigs = d.get("signals") or 0
+    thr = d.get("threshold", 10)
+    if sigs:
+        lines.append(f"⚡ Сигналов: <b>{sigs}</b> · движений от {thr:g}%: {moves}")
+    elif moves:
+        lines.append(f"Движений от {thr:g}%: <b>{moves}</b>, но ни одно не дошло до ставки.")
+    else:
+        lines.append(f"Ни одного падения от {thr:g}% — рынок стоял.")
+
+    # Only the buckets that actually caught something, so a clean funnel stays
+    # one short line instead of six zeroes.
+    reasons = [(label, d.get(key) or 0) for key, label in (
+        ("thin_market", "двинулась одна контора"),
+        ("all_books_moved", "просело у всех, брать негде"),
+        ("entry_too_low", "вход не дотянул по цене"),
+        ("low_stars", "меньше трёх звёзд"),
+        ("off_band", "коэффициент вне полосы"),
+        ("too_far", "матч слишком далеко"),
+    ) if (d.get(key) or 0) > 0]
+    if reasons:
+        lines.append("<i>не взяли: " + ", ".join(f"{lbl} — {n}" for lbl, n in reasons) + "</i>")
+
+    if d.get("open_bets"):
+        nxt = f", ближайший старт {html.escape(str(d['next_start']))}" if d.get("next_start") else ""
+        lines.append("")
+        lines.append(f"🎯 Открытых ставок: <b>{d['open_bets']}</b>{nxt}")
+
+    if d.get("graded"):
+        lines.append(f"✅ Рассчитано за период: {d['graded']}")
+
+    if d.get("credits") is not None:
+        days = f", хватит на ~{d['days_left']:.0f} дн." if d.get("days_left") else ""
+        lines.append("")
+        lines.append(f"<i>Кредитов {d['credits']:,}".replace(",", " ") + days
+                     + f" · опрос раз в {d.get('poll_minutes', 20):g} мин</i>")
+
+    if dashboard_url:
+        lines.append(f"\n🌐 {dashboard_url}")
+
+    send_telegram_message("\n".join(lines))
+
+
 def _format_seen_only(moves: list, limit: int) -> str:
     """Compact list of moves we spotted but did not bet.
 

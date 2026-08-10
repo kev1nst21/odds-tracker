@@ -151,3 +151,41 @@ html = dashboard._movements_table(rows)
 assert "цена была, но не ставили" in html, html[:400]
 assert "поставили</span>" not in html.replace("но не ставили", ""), "claimed a bet it never made"
 print("movements ok: a takeable price that never became a signal says so plainly")
+
+# --- the bot must report even when nothing fired -----------------------------
+# Requested 2026-08-10: "чтобы отчеты были в бота, а то сижу втыкаю". Until now
+# the bot spoke only on a signal, so a quiet market and a dead poller looked
+# identical from outside — which is precisely how a 46-hour outage and a day of
+# detector blindness went unnoticed this week. The digest reports the
+# MEASUREMENT, so silence stops being ambiguous.
+sent.clear()
+notifier.notify_digest({
+    "hours": 3, "threshold": 10,
+    "lines_watched": 380, "lines_blind": 0, "lines_moved": 108,
+    "movements": 0, "signals": 0,
+    "open_bets": 0, "credits": 6524, "days_left": 12.4, "poll_minutes": 20,
+}, dashboard_url="https://example.test")
+assert sent, "тихий рынок не дал вообще никакого отчёта"
+quiet = sent[-1]
+assert "380" in quiet and "108" in quiet, quiet
+assert "рынок стоял" in quiet, quiet
+assert "6 524" in quiet, quiet          # credits, space-grouped
+print("сводка ok: при нуле сигналов бот всё равно отчитывается измерением")
+
+# with signals and a funnel, the reasons must be named -- and only the ones
+# that actually caught something, so a clean funnel stays one short line
+sent.clear()
+notifier.notify_digest({
+    "hours": 3, "threshold": 10,
+    "lines_watched": 400, "lines_blind": 12, "lines_moved": 90,
+    "movements": 5, "signals": 2,
+    "all_books_moved": 2, "entry_too_low": 1, "low_stars": 0, "too_far": 0,
+    "open_bets": 3, "next_start": "11.08 18:00 UTC",
+    "credits": 6000, "poll_minutes": 20,
+}, dashboard_url="https://example.test")
+busy = sent[-1]
+assert "Сигналов: <b>2</b>" in busy, busy
+assert "просело у всех" in busy and "вход не дотянул" in busy, busy
+assert "меньше трёх звёзд" not in busy, "пустой бакет попал в отчёт"
+assert "11.08 18:00 UTC" in busy and "388" in busy, busy   # 400 - 12 compared
+print("сводка ok: причины отсева названы, пустые бакеты не печатаются")
