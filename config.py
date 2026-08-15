@@ -689,7 +689,7 @@ PUBLISH_INTERVAL_MINUTES = int(os.getenv("PUBLISH_INTERVAL_MINUTES")
 # Restored the same day: the 5M plan landed, and on five million credits a
 # reserve of 800 is a rounding error while the protection it buys (always
 # enough left to grade every open bet) is exactly as valuable as before.
-QUOTA_RESERVE_CREDITS = int(os.getenv("QUOTA_RESERVE_CREDITS", "250"))
+QUOTA_RESERVE_CREDITS = int(os.getenv("QUOTA_RESERVE_CREDITS", "800"))
 
 # --- The credit governor (2026-08-15) --------------------------------------
 # MAX_SPORTS_PER_CYCLE above stopped being a promise and became an AMBITION:
