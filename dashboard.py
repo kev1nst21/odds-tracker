@@ -1867,12 +1867,12 @@ $ticker
   </header>
 
   <section class="kpis">
-    <div class="kpi lime reveal"><b data-count="$cov_books">$cov_books_txt</b><span>контор в опросе</span></div>
-    <div class="kpi reveal"><b data-count="$cov_events">$cov_events_txt</b><span>событий за $span_label</span></div>
-    <div class="kpi reveal"><b data-count="$cov_lines">$cov_lines_txt</b><span>котировок сверено</span></div>
-    <div class="kpi reveal"><b data-count="$cov_cycles">$cov_cycles_txt</b><span>срезов рынка</span></div>
-    <div class="kpi mag reveal"><b data-count="$cov_moves">$cov_moves_txt</b><span>движений от $threshold_pct%</span></div>
-    <div class="kpi cy reveal"><b data-count="$cov_signals">$cov_signals_txt</b><span>сигналов со входом</span></div>
+    <div class="kpi lime reveal"><b data-count="$cov_books">$cov_books_txt</b><span>$cov_books_word в опросе</span></div>
+    <div class="kpi reveal"><b data-count="$cov_events">$cov_events_txt</b><span>$cov_events_word за $span_label</span></div>
+    <div class="kpi reveal"><b data-count="$cov_lines">$cov_lines_txt</b><span>$cov_lines_word</span></div>
+    <div class="kpi reveal"><b data-count="$cov_cycles">$cov_cycles_txt</b><span>$cov_cycles_word</span></div>
+    <div class="kpi mag reveal"><b data-count="$cov_moves">$cov_moves_txt</b><span>$cov_moves_word от $threshold_pct%</span></div>
+    <div class="kpi cy reveal"><b data-count="$cov_signals">$cov_signals_txt</b><span>$cov_signals_word</span></div>
   </section>
   <p class="kpi-note">Всё посчитано по тому, что реально легло в базу за $span_label — без оценок
   и множителей. Прямо сейчас открытых входов: <b>$hero_open</b>, из них на ступени
@@ -2245,6 +2245,23 @@ def render_dashboard(summaries: list, quota: dict = None):
         cov_cycles=cov["cycles"], cov_cycles_txt=_num(cov["cycles"]),
         cov_moves=cov["moves"], cov_moves_txt=_num(cov["moves"]),
         cov_signals=cov["signals"], cov_signals_txt=_num(cov["signals"]),
+        # 2026-08-15. The six labels under the headline numbers were fixed
+        # strings in the plural-many form, so they only read correctly for
+        # counts of five and up. On a reset book -- exactly the state the site
+        # is in tonight -- they came out as "101 событий", "2 срезов рынка",
+        # "32 841 котировок сверено". Every one of those is wrong Russian, and
+        # on a page whose whole pitch is that the numbers can be checked, a
+        # number that does not agree with its own noun reads as carelessness
+        # about the numbers themselves.
+        cov_books_word=_plural(cov["books"], "контора", "конторы", "контор"),
+        cov_events_word=_plural(cov["events"], "событие", "события", "событий"),
+        cov_lines_word=_plural(cov["lines"], "котировка сверена",
+                               "котировки сверены", "котировок сверено"),
+        cov_cycles_word=_plural(cov["cycles"], "срез рынка", "среза рынка",
+                                "срезов рынка"),
+        cov_moves_word=_plural(cov["moves"], "движение", "движения", "движений"),
+        cov_signals_word=_plural(cov["signals"], "сигнал со входом",
+                                 "сигнала со входом", "сигналов со входом"),
         funnel_block=_funnel_block(storage.funnel_stats(24), span_label),
         ticker=_ticker(summaries),
         summaries_html=_summaries_html(summaries, storage.recent_signals(24)),

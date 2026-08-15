@@ -140,3 +140,39 @@ for banned in ("гарантируем", "гарантия выигрыша", "�
 print("claim ok: на странице нет обещаний выигрыша")
 
 print(f"логика написанного на сайте: все утверждения совпали с кодом ({len(page)} байт)")
+
+# --- every headline number must agree with its own noun ---------------------
+# Russian noun agreement, checked on the page rather than on the helper. The
+# six KPI labels were fixed plural-many strings until 2026-08-15, so they only
+# read correctly for counts of five and up -- and a reset book, which is
+# exactly the state the tracker starts every experiment in, produced "101
+# событий", "2 срезов рынка", "32 841 котировок сверено".
+#
+# It is a small thing that is not a small thing: the entire claim of this page
+# is that its numbers can be recounted, and a number that does not agree with
+# the word next to it says nobody looked.
+KPI_FORMS = {
+    "контор": ("контора", "конторы", "контор"),
+    "событ": ("событие", "события", "событий"),
+    "котировк": ("котировка сверена", "котировки сверены", "котировок сверено"),
+    "срез": ("срез рынка", "среза рынка", "срезов рынка"),
+    "движен": ("движение", "движения", "движений"),
+    "сигнал": ("сигнал со входом", "сигнала со входом", "сигналов со входом"),
+}
+for n in (0, 1, 2, 3, 5, 11, 21, 22, 101, 1002, 32_841):
+    for stem, (one, few, many) in KPI_FORMS.items():
+        got = dashboard._plural(n, one, few, many)
+        # the rule itself, restated independently of the implementation
+        last, last2 = n % 10, n % 100
+        want = (one if last == 1 and last2 != 11
+                else few if 2 <= last <= 4 and not 12 <= last2 <= 14
+                else many)
+        assert got == want, (n, stem, got, want)
+print("claim ok: подписи под числами согласуются с ними для 0, 1, 2, 5, 11, 21, 101, 32 841")
+
+# and the rendered page must actually USE the agreeing forms, not a frozen one
+import re as _re  # noqa: E402
+for bad in (r"\b1 событий\b", r"\b2 срезов\b", r"\b1 контор\b", r"\b2 движений\b"):
+    hit = _re.search(bad, text)
+    assert not hit, f"на странице несогласованная подпись: {hit.group(0)}"
+print("claim ok: на странице нет несогласованных пар «число + слово»")
