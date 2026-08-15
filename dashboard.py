@@ -668,13 +668,32 @@ def _bankroll_block(stats: dict) -> str:
         f"<div class='bank {cls}'>"
         f"<div class='bank-head'>Если бы вы ставили по <b>${stake}</b> на каждый сигнал</div>"
         f"<div class='bank-num' data-count='{profit:.0f}' data-prefix='{sign}$'>{sign}${abs(profit):,.0f}</div>"
-        f"<div class='bank-sub'>За {n} {_plural(n, 'сыгравшую ставку', 'сыгравшие ставки', 'сыгравших ставок')} "
+        f"<div class='bank-sub'>{_played_note(stats, n)}"
         f"вы бы {word} <b>{sign}${abs(profit):,.0f}</b>. "
         f"Оборот ${staked:,.0f}, доходность {roi:+.1f}%.</div>"
         f"<div class='bank-note'>Считается по уже сыгравшим сигналам и по той цене, "
         f"которую мы называли. Это не обещание будущего результата.{_unpriced_note(stats)}</div>"
         f"</div>"
     ).replace(",", " ")
+
+
+def _played_note(stats: dict, priced: int) -> str:
+    """Opening of the bank sentence, naming BOTH counts when they differ.
+
+    Reported 2026-08-10: the optimal card said "За 5 сыгравших ставок" while
+    the same page showed 10 played, and the user was right to call it a bug --
+    both strategies bet the same events, so the number of matches played cannot
+    differ. What differs is how many of them carry a price we could pay out on:
+    a handicap is settleable from the score but was never bought. Saying "из 10
+    сыгравших 5 с известной ценой" states the gap instead of quietly reporting
+    the smaller number as if it were the whole book.
+    """
+    resolved = stats.get("resolved") or priced
+    played = _plural(resolved, "сыгравшую ставку", "сыгравшие ставки", "сыгравших ставок")
+    if resolved and priced and resolved != priced:
+        return (f"За {resolved} {played}, из которых {priced} "
+                f"{_plural(priced, 'с известной ценой', 'с известными ценами', 'с известными ценами')}, ")
+    return f"За {resolved} {played} "
 
 
 def _unpriced_note(stats: dict) -> str:
@@ -927,6 +946,38 @@ def _strategy_card(stats: dict, title: str, subtitle: str, cls: str, recent=None
     """
 
 
+def _settled_price(r) -> str:
+    """The coefficient a finished bet is judged by — never a bare dash.
+
+    Reported 2026-08-10 on Rafael Jodar — Brandon Nakashima: a settled row
+    showed no price at all. It was a handicap play, where the bought price is
+    null and only the derived one exists, so the cell rendered "—" while the
+    result still counted in the win rate. Showing a verdict without the number
+    it was reached on is the one thing this page must never do -- the whole
+    claim of the site is that every figure can be recounted.
+
+    A derived price is marked with "~" and stays out of the money; that
+    distinction is made in the bank block, not hidden by blanking the cell.
+    """
+    def _num(key):
+        try:
+            v = r[key]
+        except (KeyError, IndexError):
+            return None
+        return v
+
+    price = _num("entry_price")
+    if price:
+        return f"{price:.2f}"
+    opt = _num("opt_price")
+    if opt:
+        return f"{opt:.2f}"
+    est = _num("opt_est_price")
+    if est:
+        return f"~{est:.2f}"
+    return "—"
+
+
 def _mini_resolved(stats: dict, limit: int = 10) -> str:
     """The last finished bets for ONE strategy, opened from its "проверено".
 
@@ -941,7 +992,7 @@ def _mini_resolved(stats: dict, limit: int = 10) -> str:
     for r in rows:
         home, away = r["home_team"], r["away_team"]
         event = f"{home} — {away}" if home and away else str(r["fixture_id"])
-        price = f"{r['entry_price']:.2f}" if r["entry_price"] else "—"
+        price = _settled_price(r)
         score = _score_text(r["fixture_id"])
         score_html = f" · <b>{score}</b>" if score else ""
         cls, label = _RESULT_LABEL.get(r["result"], ("pending", "⏳ ждём"))
@@ -1131,7 +1182,7 @@ def _last_bets(bets, limit: int = 10) -> str:
         home, away = b["home_team"], b["away_team"]
         event = f"{home} — {away}" if home and away else str(b["fixture_id"])
         stars = "★" * (b["stars"] or 0)
-        entry = f"{b['entry_price']:.2f}" if b["entry_price"] else "—"
+        entry = _settled_price(b)
         score = _score_text(b["fixture_id"])
         score_html = f"<span class='b-score'>{score}</span>" if score else ""
         status = _both_results(b)

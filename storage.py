@@ -1016,6 +1016,15 @@ def alert_stats(kind: str = "prematch", strategy: str = "aggressive"):
     # Handicap plays carry no price and no line, so they can never be settled.
     # They are counted in the signal total but excluded from anything that
     # claims to measure performance.
+    # 2026-08-10: this clause used to gate the COUNTS as well as the money, and
+    # that made the optimal card contradict the aggressive one -- "10 сыгравших"
+    # on one, "За 5 сыгравших ставок" on the other, from the same signal stream.
+    # Reported by the user, and he was right: both strategies bet the same
+    # events, so the number of matches PLAYED cannot differ between them. Only
+    # the money can, because a handicap we never bought a price for is
+    # settleable from the score but not payable. So the clause now restricts
+    # the bank alone; everything that answers "how many did we check" counts
+    # every resolved signal.
     checkable = " AND opt_gradeable=1" if strategy == "optimal" else ""
     with _conn() as conn:
         k = (kind,) + sp
@@ -1028,25 +1037,26 @@ def alert_stats(kind: str = "prematch", strategy: str = "aggressive"):
             f"SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=?{sf} AND opt_gradeable=0"
         )["n"] if strategy == "optimal" else 0
         resolved = one(
-            f"SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=? AND resolved=1{sf}{checkable}"
+            f"SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=? AND resolved=1{sf}"
         )["n"]
         hits = one(
-            f"SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=? AND {res_col}='hit'{sf}{checkable}"
+            f"SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=? AND {res_col}='hit'{sf}"
         )["n"]
         misses = one(
-            f"SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=? AND {res_col}='miss'{sf}{checkable}"
+            f"SELECT COUNT(*) AS n FROM tracked_alerts WHERE kind=? AND {res_col}='miss'{sf}"
         )["n"]
         clv_row = one(
             "SELECT AVG(clv_pct) AS avg_clv, "
             "SUM(CASE WHEN clv_continued=1 THEN 1 ELSE 0 END) AS clv_wins, "
             "SUM(CASE WHEN clv_continued IS NOT NULL THEN 1 ELSE 0 END) AS clv_n "
-            f"FROM tracked_alerts WHERE kind=? AND clv_pct IS NOT NULL{sf}{checkable}"
+            f"FROM tracked_alerts WHERE kind=? AND clv_pct IS NOT NULL{sf}"
         )
         recent = conn.execute(
             "SELECT fixture_id, sport_key, home_team, away_team, outcome_name, stars, "
             f"       old_price, new_price, {price_col} AS entry_price, entry_book, "
-            f"       {res_col} AS result, clv_pct, clv_continued, resolved_at "
-            f"FROM tracked_alerts WHERE kind=? AND resolved=1{sf}{checkable} "
+            f"       {res_col} AS result, clv_pct, clv_continued, resolved_at, "
+            "       opt_kind, opt_price, opt_est_price, opt_gradeable "
+            f"FROM tracked_alerts WHERE kind=? AND resolved=1{sf} "
             "ORDER BY resolved_at DESC LIMIT 20", k
         ).fetchall()
         # Flat-stake profit/loss over every graded bet, priced at the entry THIS
@@ -1073,6 +1083,10 @@ def alert_stats(kind: str = "prematch", strategy: str = "aggressive"):
             "pending": total - resolved,
             "hits": hits,
             "misses": misses,
+            # Resolved bets that carry a price we could pay out on. Differs
+            # from "resolved" only for the optimal line, where a handicap is
+            # settleable from the score but was never bought.
+            "priced_n": len(graded),
             "win_rate": (hits / (hits + misses) * 100) if (hits + misses) else None,
             "avg_clv_pct": clv_row["avg_clv"],
             "clv_continued_rate": (clv_row["clv_wins"] / clv_n * 100) if clv_n else None,
