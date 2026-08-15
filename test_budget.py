@@ -147,3 +147,53 @@ for cap in (3, 6, 9, 15, 30):
 print("инвариант ok: при любом бюджете в цикле остаётся и теннис, и широкий обход")
 
 print("охват под бюджетом: все инварианты пройдены")
+
+# --- 11. the region ladder must climb with the balance, never starve it -----
+# Bookmakers are what the funnel is short of, and region is the only lever that
+# adds them. The promise this module makes is that paying for a bigger plan
+# widens the product with no commit -- so the ladder is tested exactly like the
+# league width: monotonic in credits, capped, and never bought by gutting the
+# league list.
+import importlib  # noqa: E402
+importlib.reload(budget)
+
+rungs = []
+for remaining in (1_200, 20_000, 100_000, 5_000_000):
+    p = plan(remaining)
+    n = len(p["regions"].split(","))
+    rungs.append(n)
+    # whatever it picked, the arithmetic must still fit the plan
+    if p["sports"] > p["floor"]:
+        spend = p["sports"] * p["credits_per_sport"] * p["cycles_left"]
+        assert spend <= remaining - config.QUOTA_RESERVE_CREDITS, (remaining, spend, p)
+    # and a region is never taken at the price of a gutted league list
+    if n > 1:
+        assert p["sports"] >= config.REGION_STEP_MIN_SPORTS, (remaining, p)
+assert rungs == sorted(rungs), rungs
+assert rungs[0] == 1, rungs
+assert rungs[-1] == len(config.REGION_LADDER.split(",")), rungs
+print(f"инвариант ok: лестница регионов растёт с балансом {rungs} и упирается "
+      f"в {config.REGION_LADDER}")
+
+# the small plan we are on today must be left exactly as it is
+p = plan(1_137)
+assert p["regions"] == "eu", p["regions"]
+assert p["credits_per_sport"] == 1, p
+print("инвариант ok: на текущем балансе регион остаётся один — апгрейд не имитируется")
+
+# and on the 5M plan at a 5-minute cadence the full scenario must be affordable
+p = plan(5_000_000, poll=5)
+month = p["sports"] * p["credits_per_sport"] * (30 * 24 * 60 / 5)
+assert p["sports"] == config.MAX_SPORTS_PER_CYCLE and len(p["regions"].split(",")) == 4, p
+assert month < 5_000_000, month
+print(f"инвариант ok: план 5M при опросе раз в 5 мин даёт {p['sports']} лиг × "
+      f"{p['regions']} = {month:,.0f} кр./мес, укладывается".replace(",", " "))
+
+# --- 12. what the fetch actually asks for is what the plan paid for ---------
+plan(5_000_000)
+assert budget.active_regions() == "eu,uk,au,us", budget.active_regions()
+plan(1_137)
+assert budget.active_regions() == "eu", budget.active_regions()
+print("инвариант ok: запрос к API идёт с теми регионами, которые посчитал бюджет")
+
+print("лестница регионов: все инварианты пройдены")

@@ -646,6 +646,31 @@ QUOTA_PERIOD_DAYS = float(os.getenv("QUOTA_PERIOD_DAYS", "30"))
 QUOTA_WARN_CREDITS = int(os.getenv("QUOTA_WARN_CREDITS", "2500"))
 QUOTA_WARN_INTERVAL_HOURS = float(os.getenv("QUOTA_WARN_INTERVAL_HOURS", "6"))
 
+# --- The region ladder (2026-08-15) ----------------------------------------
+# Bookmakers are the binding constraint on signal count -- see the note above
+# REGIONS -- and region is the only lever that adds them. So regions climb on
+# their own as the balance allows, exactly the way breadth does. The point is
+# that buying a bigger plan needs no code: the next cycle sees more credits,
+# affords another region, and the number of books roughly doubles the same
+# hour.
+#
+# Order matters and is by value per credit, not alphabetical:
+#   eu  the sharp reference books (Pinnacle, 1xBet, Marathon). Never dropped.
+#   uk  ~15 books that exist nowhere else, all serious on soccer and tennis.
+#   au  the only region carrying bet365, the largest book in the world.
+#   us  DraftKings, FanDuel, BetMGM -- deep on US sports, thinner on European
+#       soccer, so it is bought last.
+# se and fr are deliberately absent: they overlap eu almost entirely and would
+# cost a full multiple for a handful of books already visible.
+AUTO_REGIONS = os.getenv("AUTO_REGIONS", "1") not in ("0", "false", "False")
+REGION_LADDER = os.getenv("REGION_LADDER", "eu,uk,au,us")
+
+# A region must never be bought by starving the league list. Doubling the price
+# per league while the cycle can only afford eight of them trades away more
+# market than it buys books, so the next rung is only taken once the budget can
+# still keep this many leagues at the HIGHER per-league price.
+REGION_STEP_MIN_SPORTS = int(os.getenv("REGION_STEP_MIN_SPORTS", "20"))
+
 # --- Strategy split (user decision, 2026-07-29) ----------------------------
 # Every signal is logged once and then counted under BOTH headings, so the two
 # win rates are measured on the same events rather than on two different

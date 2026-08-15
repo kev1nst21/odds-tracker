@@ -47,6 +47,9 @@ from config import (
     QUOTA_RESERVE_CREDITS,
     QUOTA_PERIOD_DAYS,
     AUTO_BUDGET,
+    AUTO_REGIONS,
+    REGION_LADDER,
+    REGION_STEP_MIN_SPORTS,
 )
 
 # What the last cycle worked out, for the dashboard and the digest to read
@@ -54,7 +57,11 @@ from config import (
 LAST_PLAN = {}
 
 
-def credits_per_sport() -> int:
+def _split(spec) -> list:
+    return [x.strip() for x in str(spec or "").split(",") if x.strip()]
+
+
+def credits_per_sport(regions=None) -> int:
     """The Odds API bills markets x regions per sport key, per call.
 
     Confirmed against the published rule ("cost = [number of markets] x
@@ -63,9 +70,43 @@ def credits_per_sport() -> int:
     eu to eu,uk doubles the bill for the whole cycle rather than adding a line
     item.
     """
-    markets = len([m for m in str(MARKETS).split(",") if m.strip()])
-    regions = len([r for r in str(REGIONS).split(",") if r.strip()])
+    markets = len(_split(MARKETS))
+    regions = len(_split(regions if regions is not None else REGIONS))
     return max(1, markets) * max(1, regions)
+
+
+def _afford_regions(per_cycle: float, markets: int) -> str:
+    """How many bookmaker regions this balance can carry.
+
+    Region is the only lever that adds bookmakers, and bookmakers are what the
+    funnel says we are short of: the two biggest reasons a movement fails to
+    become a bet are "every book moved, nowhere left to back it" and "the best
+    remaining price missed the entry rule". Both are a shortage of books. More
+    books means more laggards still holding the old price, and a laggard IS the
+    bet.
+
+    So regions climb the ladder on their own as credits allow, exactly like
+    breadth does -- which is the whole promise of this module: pay for a bigger
+    plan and the product widens by itself, within the hour, with no commit and
+    nobody remembering to flip a switch.
+
+    The guard is REGION_STEP_MIN_SPORTS. A second region must never be bought
+    by starving the league list: doubling the price per league while the cycle
+    can only afford eight of them would trade away more market than it buys
+    books. So a region is only added once the budget can still keep a
+    respectable number of leagues WHILE paying the higher per-league price.
+    """
+    ladder = _split(REGION_LADDER) or _split(REGIONS) or ["eu"]
+    afford = 1
+    for n in range(2, len(ladder) + 1):
+        if per_cycle >= REGION_STEP_MIN_SPORTS * n * max(1, markets):
+            afford = n
+    return ",".join(ladder[:afford])
+
+
+def active_regions() -> str:
+    """The region string this cycle is actually paying for."""
+    return (LAST_PLAN.get("regions") if LAST_PLAN else None) or REGIONS
 
 
 def _period_days_left(now: datetime) -> float:
@@ -167,6 +208,17 @@ def plan(remaining, now=None, poll_minutes=None) -> dict:
     usable = max(0, remaining - QUOTA_RESERVE_CREDITS)
     cycles_left = max(1.0, days_left * 24 * 60 / poll_minutes)
     per_cycle = usable / cycles_left
+
+    # Depth before breadth is decided: how many bookmaker regions the balance
+    # can carry. On a small plan this stays at "eu" and nothing changes; on a
+    # large one it climbs to eu,uk,au,us and the number of books roughly
+    # triples, which is the change the funnel actually asks for.
+    if AUTO_REGIONS:
+        regions = _afford_regions(per_cycle, len(_split(MARKETS)))
+        per_sport = credits_per_sport(regions)
+        out["regions"] = regions
+        out["credits_per_sport"] = per_sport
+        out["region_count"] = len(_split(regions))
     # One credit of the cycle goes to overheads that are not sport keys (the
     # results check, the odd retry), so the division is deliberately floor().
     affordable = int(per_cycle // per_sport)
@@ -196,6 +248,7 @@ def describe(p: dict = None) -> str:
     if p.get("reason") != "budget":
         return f"бюджет: {p.get('sports')} лиг/цикл (по конфигу)"
     line = (f"бюджет: {p['sports']} лиг/цикл из {p['ambition']} желаемых · "
+            f"регионы {p.get('regions')} · "
             f"{p['credits_per_sport']} кр. за лигу · {p['per_cycle']:.0f} кр. на цикл "
             f"({p['usable']} доступно на {p['days_left']:.1f} дн.)")
     if p.get("starved"):

@@ -255,7 +255,13 @@ def fetch_odds_for_sport(sport_key: str, on_error=None) -> list:
     every bookmaker's prices nested inside. Costs len(MARKETS split by comma)
     x len(REGIONS split by comma) credits (confirmed live 2026-07-29)."""
     try:
-        return _get(f"/v4/sports/{sport_key}/odds/", {"regions": REGIONS, "markets": MARKETS})
+        # Not the REGIONS constant: budget.plan() already decided this cycle how
+        # many regions the balance can carry, and paying for four while the
+        # governor sized the league list for one is how a plan gets emptied in
+        # a weekend.
+        import budget
+        return _get(f"/v4/sports/{sport_key}/odds/",
+                    {"regions": budget.active_regions(), "markets": MARKETS})
     except TheOddsApiError as exc:
         if on_error:
             on_error(sport_key, exc)
