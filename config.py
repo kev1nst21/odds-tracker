@@ -635,6 +635,14 @@ AUTO_BUDGET = os.getenv("AUTO_BUDGET", "1") not in ("0", "false", "False")
 # guard, and it should stay the ONLY thing that stops us.
 MIN_SPORTS_PER_CYCLE = int(os.getenv("MIN_SPORTS_PER_CYCLE", "6"))
 
+# The width to use when the credit balance is genuinely unknown -- a brand new
+# database, or AUTO_BUDGET switched off. Deliberately the pre-governor value
+# rather than MAX_SPORTS_PER_CYCLE: an unknown balance must never authorise the
+# largest possible spend. It did exactly that for one afternoon on 2026-08-15,
+# because the sports list is served from cache and a whole cycle can therefore
+# complete without any response header ever carrying a quota figure.
+COLD_START_SPORTS = int(os.getenv("COLD_START_SPORTS", "15"))
+
 # The provider's allowance is monthly. The exact reset date is never sent in
 # any header, so budget.observe() infers it: `used` only climbs inside a
 # period, so the moment it falls, a new one has begun.

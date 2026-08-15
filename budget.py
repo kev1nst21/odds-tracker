@@ -47,6 +47,7 @@ from config import (
     QUOTA_RESERVE_CREDITS,
     QUOTA_PERIOD_DAYS,
     AUTO_BUDGET,
+    COLD_START_SPORTS,
     AUTO_REGIONS,
     REGION_LADDER,
     REGION_STEP_MIN_SPORTS,
@@ -102,6 +103,31 @@ def _afford_regions(per_cycle: float, markets: int) -> str:
         if per_cycle >= REGION_STEP_MIN_SPORTS * n * max(1, markets):
             afford = n
     return ",".join(ladder[:afford])
+
+
+def _remembered_balance():
+    """The last credit balance any cycle actually saw.
+
+    Written by remember() at the end of every poll. Reading it here is what
+    lets the governor decide a width before the first request of a cycle has
+    been made -- which is every time it is asked.
+    """
+    import storage
+    try:
+        v = storage.get_meta("quota_remaining_seen")
+        return int(v) if v not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def remember(quota: dict) -> None:
+    """Persist the balance so the next cycle can size itself before spending."""
+    import storage
+    try:
+        remaining = int((quota or {}).get("remaining"))
+    except (TypeError, ValueError):
+        return
+    storage.set_meta("quota_remaining_seen", str(remaining))
 
 
 def active_regions() -> str:
@@ -189,20 +215,37 @@ def plan(remaining, now=None, poll_minutes=None) -> dict:
         "reserve": QUOTA_RESERVE_CREDITS,
     }
 
-    if not AUTO_BUDGET or remaining is None:
-        # No governor, or nothing measured yet (the very first call of a run,
-        # before any response has carried a quota header). Trust the config --
-        # runner.py's reserve guard is still there as the hard stop.
-        out.update({"sports": ambition, "capped": False, "reason": "no-data"})
-        LAST_PLAN.update(out)
-        return out
+    # THE BALANCE IS ALMOST NEVER KNOWN WHEN THIS IS ASKED, and pretending
+    # otherwise shipped a live bug on 2026-08-15. The quota only arrives in a
+    # response header, but the width has to be decided BEFORE the first request
+    # of the cycle -- and the sports list is served from cache, so a whole run
+    # can go by without odds_client.LAST_QUOTA ever being filled in. The first
+    # published ledger under the governor duly read
+    # `"remaining": null, "sports": 60, "reason": "no-data"` -- the governor
+    # politely standing aside at the exact moment it was supposed to be
+    # governing, on the day the plan had a thousand credits left.
+    #
+    # So the balance is remembered across cycles. Last cycle's number is a fine
+    # estimate of this cycle's: it can be at most one cycle's spend stale.
+    if remaining is None:
+        remaining = _remembered_balance()
 
     try:
         remaining = int(remaining)
     except (TypeError, ValueError):
-        out.update({"sports": ambition, "capped": False, "reason": "no-data"})
+        remaining = None
+
+    if not AUTO_BUDGET or remaining is None:
+        # Genuinely nothing to go on: no governor, or a database so fresh that
+        # no cycle has ever completed. Fall back to the width that was in force
+        # before the governor existed rather than to the ambition -- an unknown
+        # balance must never authorise the LARGEST possible spend, which is
+        # precisely the mistake described above.
+        out.update({"sports": min(ambition, COLD_START_SPORTS),
+                    "capped": ambition > COLD_START_SPORTS, "reason": "no-data"})
         LAST_PLAN.update(out)
         return out
+    out["remaining"] = remaining
 
     days_left = _period_days_left(now)
     usable = max(0, remaining - QUOTA_RESERVE_CREDITS)

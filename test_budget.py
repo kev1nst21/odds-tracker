@@ -121,10 +121,14 @@ assert late >= early, (late, early)
 print(f"инвариант ok: к концу периода остаток тратится шире ({early} → {late}), "
       f"а не сгорает неиспользованным")
 
-# --- 9. no data yet must not narrow anything -------------------------------
+# --- 9. no data yet must fall back DOWN, not up ----------------------------
+# See invariant 13 for the live bug that rewrote this one. An unknown balance
+# is not permission to spend the maximum.
+storage.set_meta("quota_remaining_seen", "")
 p = plan(None)
-assert p["sports"] == config.MAX_SPORTS_PER_CYCLE and not p["capped"], p
-print("инвариант ok: до первого ответа API охват не режется")
+assert p["reason"] == "no-data", p
+assert p["sports"] == min(config.MAX_SPORTS_PER_CYCLE, config.COLD_START_SPORTS), p
+print(f"инвариант ok: до первого ответа API берём осторожные {p['sports']} лиг")
 
 print("бюджетный регулятор: все инварианты пройдены")
 
@@ -197,3 +201,32 @@ assert budget.active_regions() == "eu", budget.active_regions()
 print("инвариант ok: запрос к API идёт с теми регионами, которые посчитал бюджет")
 
 print("лестница регионов: все инварианты пройдены")
+
+# --- 13. an unknown balance must never authorise the largest spend ----------
+# Shipped live and caught by the published ledger on 2026-08-15: the quota only
+# arrives in a response header, but the width is chosen BEFORE the first
+# request, and the sports list is served from cache -- so a whole cycle can
+# complete without LAST_QUOTA ever being filled. The governor read None and
+# politely handed back the full ambition, on a day the plan had 1 137 credits.
+storage.set_meta("quota_remaining_seen", "")
+p = plan(None)
+assert p["sports"] == min(config.MAX_SPORTS_PER_CYCLE, config.COLD_START_SPORTS), p
+assert p["sports"] < config.MAX_SPORTS_PER_CYCLE, p
+print(f"инвариант ok: без данных берём осторожные {p['sports']} лиг, "
+      f"а не максимальные {config.MAX_SPORTS_PER_CYCLE}")
+
+# and once a cycle has seen the balance, the next one sizes itself properly
+budget.remember({"remaining": 1_137})
+p = plan(None)
+assert p["reason"] == "budget", p
+assert p["remaining"] == 1_137, p
+assert p["sports"] == p["floor"], p
+print(f"инвариант ok: баланс запоминается между циклами — {p['remaining']} кр. "
+      f"→ {p['sports']} лиг ещё до первого запроса")
+
+budget.remember({"remaining": 5_000_000})
+p = plan(None)
+assert p["sports"] == config.MAX_SPORTS_PER_CYCLE and p["regions"] == config.REGION_LADDER, p
+print("инвариант ok: после апгрейда следующий же цикл берёт полный охват и все регионы")
+
+print("холодный старт: все инварианты пройдены")

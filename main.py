@@ -296,6 +296,12 @@ def run_once():
     # What the governor allowed this cycle, recorded before rendering so the
     # page can state the width it is actually running at rather than the width
     # someone once typed into config.
+    # Remember the balance for the NEXT cycle. The quota only ever arrives in a
+    # response header, but the width has to be chosen before the first request
+    # is made, so without this the governor is asked a question it cannot
+    # answer and stands aside -- which is exactly what it did for one afternoon
+    # on 2026-08-15, publishing "remaining": null next to the full ambition.
+    budget.remember(odds_client.LAST_QUOTA)
     if budget.LAST_PLAN:
         storage.set_meta("budget_plan", json.dumps(budget.LAST_PLAN))
         line = budget.describe()
