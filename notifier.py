@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 import requests
 
 from config import (
+    STAR_LABELS,
+    MIN_SIGNAL_STARS,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
     OPTIMAL_MAX_PRICE,
@@ -68,10 +70,17 @@ def _format_event(s: dict) -> str:
     home = html.escape(s.get("home_team") or "?")
     away = html.escape(s.get("away_team") or "?")
     start = _fmt_start(s.get("start_time"))
-    stars = "⭐" * s.get("stars", 0)
+    n_stars = s.get("stars", 0)
+    stars = "⭐" * n_stars
+    # The word matters more than the glyphs. Since 2026-08-15 three confidence
+    # levels are published instead of one, so a reader has to be able to tell
+    # at a glance which one this is -- otherwise "more signals" just reads as
+    # "the bot got noisier".
+    tier = STAR_LABELS.get(n_stars, "")
+    head = f"{stars} {tier}".strip()
     name = html.escape(bet.get("name") or "")
 
-    lines = [f"{stars} <b>{home} — {away}</b>".strip()]
+    lines = [f"{head} <b>{home} — {away}</b>".strip()]
     if start:
         # Time left matters more than the clock time: it decides whether this
         # is something to act on now or to note for later.
@@ -165,11 +174,14 @@ def notify_summaries(summaries: list, max_events: int = 6, dashboard_url: str = 
     if not actionable and not seen_only:
         return
 
-    strong = sum(1 for s in actionable if s.get("stars", 0) >= 3)
+    by_tier = [(n, sum(1 for s in actionable if s.get("stars", 0) == n))
+               for n in (4, 3, 2)]
     opt = sum(1 for s in actionable if s.get("strategy") == "optimal")
     header = f"⚡ <b>Сигналы — {len(actionable)}</b>"
-    if strong:
-        header += f"\n⭐⭐⭐ подтверждено рынком: <b>{strong}</b>"
+    tiers = [f"{'⭐' * n} {STAR_LABELS.get(n, '')}: <b>{c}</b>"
+             for n, c in by_tier if c]
+    if tiers:
+        header += "\n" + " · ".join(tiers)
     if opt:
         header += f"\n🟢 из них оптимальных (коэф. ≤ {OPTIMAL_MAX_PRICE:g}): <b>{opt}</b>"
 
@@ -230,7 +242,7 @@ def notify_digest(d: dict, dashboard_url: str = None):
         ("thin_market", "двинулась одна контора"),
         ("all_books_moved", "просело у всех, брать негде"),
         ("entry_too_low", "вход не дотянул по цене"),
-        ("low_stars", "меньше трёх звёзд"),
+        ("low_stars", f"меньше {MIN_SIGNAL_STARS} звёзд"),
         ("off_band", "коэффициент вне полосы"),
         ("too_far", "матч слишком далеко"),
     ) if (d.get(key) or 0) > 0]

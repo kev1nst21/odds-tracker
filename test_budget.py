@@ -98,11 +98,13 @@ assert narrow <= wide_slow, (narrow, wide_slow)
 print(f"инвариант ok: второй регион удваивает цену лиги ({before} → {after}) "
       f"и сужает охват {wide_slow} → {narrow}, если кредиты не добавить")
 
-# --- 7. a rollover is noticed, and resets the horizon ----------------------
+# --- 7. a rollover is still noticed, even though the calendar now rules ----
+# observe() keeps watching `used` fall, because a contradiction between the
+# stated rule and observed reality is worth recording. It just is not what
+# sizes the cycle any more.
 storage.set_meta("quota_used_seen", "18000")
 budget.observe({"used": 120, "remaining": 19_880}, now)
 assert storage.get_meta("quota_period_start"), "откат плана не замечен"
-assert abs(budget._period_days_left(now) - config.QUOTA_PERIOD_DAYS) < 0.01
 # and it must NOT fire on the ordinary case of the counter climbing
 storage.set_meta("quota_period_start", "")
 budget.observe({"used": 500, "remaining": 19_500}, now)
@@ -110,16 +112,28 @@ budget.observe({"used": 700, "remaining": 19_300}, now)
 assert not storage.get_meta("quota_period_start"), "обычный расход принят за откат"
 print("инвариант ok: откат плана распознаётся по падению used, обычный расход — нет")
 
-# --- 8. as the period runs down, the same balance buys more per cycle ------
-# The point of dividing by time remaining rather than by a fixed month: credits
-# left on the last day should be spent, not hoarded into an expiry.
-storage.set_meta("quota_period_start", (now - timedelta(days=28)).isoformat())
-late = plan(60_000)["sports"]
-storage.set_meta("quota_period_start", (now - timedelta(days=1)).isoformat())
-early = plan(60_000)["sports"]
-assert late >= early, (late, early)
-print(f"инвариант ok: к концу периода остаток тратится шире ({early} → {late}), "
-      f"а не сгорает неиспользованным")
+# --- 8. the reset is the 1st of the month, not an anniversary --------------
+# Taken verbatim from the provider's own dashboard on 2026-08-15: "Monthly
+# plans reset on the 1st of each month at 12AM UTC". Before this the code
+# guessed a rolling 30 days and under-spent the balance by up to half.
+for stamp, expect in ((datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc), 16.5),
+                      (datetime(2026, 8, 31, 0, 0, tzinfo=timezone.utc), 1.0),
+                      (datetime(2026, 12, 30, 0, 0, tzinfo=timezone.utc), 2.0),
+                      (datetime(2026, 2, 10, 0, 0, tzinfo=timezone.utc), 19.0)):
+    got = budget._period_days_left(stamp)
+    assert abs(got - expect) < 0.01, (stamp, got, expect)
+# the last hour of the month must not hand the whole balance to one cycle
+assert budget._period_days_left(
+    datetime(2026, 8, 31, 23, 59, tzinfo=timezone.utc)) >= 0.5
+print("инвариант ok: горизонт считается до 1-го числа (в т.ч. через декабрь "
+      "и февраль), и в последний час месяца не схлопывается в ноль")
+
+# --- 8b. a balance is spent before it expires, not hoarded -----------------
+mid = plan(60_000, poll=20)
+end = budget.plan(60_000, now=datetime(2026, 8, 29, tzinfo=timezone.utc), poll_minutes=20)
+assert end["sports"] >= mid["sports"], (end["sports"], mid["sports"])
+print(f"инвариант ok: ближе к сбросу тот же остаток тратится шире "
+      f"({mid['sports']} → {end['sports']}), а не сгорает")
 
 # --- 9. no data yet must fall back DOWN, not up ----------------------------
 # See invariant 13 for the live bug that rewrote this one. An unknown balance

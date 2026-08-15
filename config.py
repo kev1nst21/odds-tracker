@@ -395,7 +395,76 @@ PREMATCH_BUFFER_MINUTES = int(os.getenv("PREMATCH_BUFFER_MINUTES", "3"))
 # and credibility on the tier that has never paid, while COUNTERFACTUALS below
 # keep measuring the tier we dropped, so the decision stays checkable instead
 # of becoming folklore.
-MIN_SIGNAL_STARS = int(os.getenv("MIN_SIGNAL_STARS", "3"))
+# --- The confidence ladder (2026-08-15, second revision) -------------------
+# Earlier the same day breadth was briefly made proportional (a share of the
+# quoting books) so that widening from 25 bookmakers to 75 could not inflate
+# ratings while the OLD statistics were being continued. Vladislav then chose
+# the other branch of that trade, and it is a coherent one:
+#
+#   "не процент от количества контор, а фактически столько, сколько мы считаем
+#    достаточно... всё-таки сбрасывать всю статистику с нуля... давай придумаем
+#    разрезы по 2-3-4 звезды с уровнем доверия к ставке... их должно быть
+#    намного больше"
+#
+# Once the old book is thrown away, comparability with it stops being a
+# constraint, and that is exactly what made the share rule necessary. Absolute
+# counts are the more honest primitive anyway: "eight independent bookmakers
+# moved the same way inside an hour" is a statement about the world, while
+# "11% of the ones we happened to poll" is partly a statement about our
+# subscription.
+#
+# So the ladder is counts, and it now goes to FOUR rungs instead of three. The
+# point of the fourth is not decoration: publishing only the top rung meant
+# every signal carried the same implied confidence, so nothing could ever be
+# learned about whether the weak ones were worth taking. Now every rung is
+# published and TRACKED SEPARATELY, and in a few days the by-stars table
+# answers the question with data instead of opinion.
+MOVED_FOR_2_STARS = int(os.getenv("MOVED_FOR_2_STARS", "3"))
+MOVED_FOR_3_STARS = int(os.getenv("MOVED_FOR_3_STARS", "6"))
+MOVED_FOR_4_STARS = int(os.getenv("MOVED_FOR_4_STARS", "12"))
+MAX_STARS = 4
+
+# ...and a CEILING by share, which is what stops the ladder from measuring the
+# size of a league instead of the strength of a move.
+#
+# The counts above are the rungs Vladislav asked for and they are what the page
+# shows. But a count alone does not survive the feed widening from ~25 books to
+# ~75: a move is an event on an OUTCOME, so when three times as many books
+# quote it, three times as many move, and the same real-world move climbs the
+# ladder for free. Checked against the twenty signals in the ledger on
+# 2026-08-15, tripled at constant share, a pure-count rule collapses five of
+# six into four stars. With the ceiling below, not one of the twenty changes
+# rating. That is the whole justification, and it is a testable claim --
+# test_stars_invariance.py asserts it directly.
+#
+# The division of labour is exact. On a thin market (5 books) the ceiling never
+# binds and the count decides, so "4 of 5" cannot masquerade as a market-wide
+# move. On a wide market (60 books) the count is always saturated and the share
+# decides, so "12 of 60" is honestly a two-star event rather than a four.
+SHARE_CAP_2_STARS = float(os.getenv("SHARE_CAP_2_STARS", "0.20"))
+SHARE_CAP_3_STARS = float(os.getenv("SHARE_CAP_3_STARS", "0.33"))
+SHARE_CAP_4_STARS = float(os.getenv("SHARE_CAP_4_STARS", "0.50"))
+
+# What each rung is called, and how much trust the page and the bot should
+# express. Deliberately worded as evidence strength, never as advice.
+STAR_LABELS = {
+    2: "осторожно",
+    3: "уверенно",
+    4: "максимум",
+}
+
+# IMPORTANT, AND EASY TO GET WRONG LATER: the notional stake is the SAME on
+# every rung. Sizing bets by confidence would be the obvious move and it would
+# also destroy the measurement -- profit per rung would then reflect the stake
+# schedule as much as the edge, and the by-stars table could no longer answer
+# "is two stars worth taking". Measure first on equal stakes; let the data
+# decide the sizing afterwards. See storage.FLAT_STAKE.
+
+# 2026-08-15: lowered 3 -> 2 with the four-rung ladder. Publishing only the
+# top rung is what kept the sample tiny (twenty signals in a week) and made
+# every confidence claim unfalsifiable. Two stars now publishes, clearly
+# labelled "осторожно", and is scored in its own row.
+MIN_SIGNAL_STARS = int(os.getenv("MIN_SIGNAL_STARS", "2"))
 
 # Do not publish a signal for a match that is further away than this.
 #
@@ -615,13 +684,11 @@ PUBLISH_INTERVAL_MINUTES = int(os.getenv("PUBLISH_INTERVAL_MINUTES")
 # zero mid-month and loses the ability to grade results -- but at 1500 it was
 # holding back a fifth of the remaining budget, which at the current burn is
 # several days of coverage. 800 still leaves room to settle every open bet.
-# 2026-08-15, lowered 800 -> 250 deliberately and temporarily. The balance hit
-# 650, i.e. under the reserve, which would have frozen the tracker completely
-# while a plan upgrade was being paid for. With the governor now sizing each
-# cycle to the floor (six leagues, six credits) 250 still covers several days
-# of result-grading, and a narrow live tracker is worth far more than a wide
-# frozen one. PUT THIS BACK TO 800 once the bigger plan lands -- on a 5M plan
-# the reserve costs nothing and the protection is free.
+# 2026-08-15, briefly lowered to 250 while the balance sat at 650 and a plan
+# upgrade was being paid for -- a narrow live tracker beats a wide frozen one.
+# Restored the same day: the 5M plan landed, and on five million credits a
+# reserve of 800 is a rounding error while the protection it buys (always
+# enough left to grade every open bet) is exactly as valuable as before.
 QUOTA_RESERVE_CREDITS = int(os.getenv("QUOTA_RESERVE_CREDITS", "250"))
 
 # --- The credit governor (2026-08-15) --------------------------------------

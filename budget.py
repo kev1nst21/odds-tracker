@@ -138,27 +138,29 @@ def active_regions() -> str:
 def _period_days_left(now: datetime) -> float:
     """Days until the plan's credits reset.
 
-    Nothing in the API says when that happens -- the allowance is monthly from
-    the subscription date, which we are never told. So it is INFERRED: `used`
-    climbs all month and drops when the period rolls over, and observe() below
-    writes down the date it saw that happen. Until a rollover has been seen we
-    assume a whole period is still ahead, which is the conservative direction:
-    it makes the per-cycle allowance smaller, never larger.
+    This used to be guesswork. The allowance is monthly, nothing in the API
+    says when the month turns over, so the code inferred it from `used`
+    falling and otherwise assumed a full period ahead -- deliberately
+    conservative, and wrong by up to 2x in the direction of under-spending.
+
+    2026-08-15 removed the guess. The provider's own dashboard states the rule
+    outright: "Monthly plans reset on the 1st of each month at 12AM UTC". It is
+    a CALENDAR month, not a subscription anniversary, so the answer is simply
+    the time until the next 1st and no observation is needed at all.
+
+    The inferred marker is still honoured if something ever contradicts this --
+    observe() keeps writing it -- but the calendar is the primary answer,
+    because a measured fact beats an inference every time.
     """
-    import storage
-    start = storage.get_meta("quota_period_start")
-    if not start:
-        return float(QUOTA_PERIOD_DAYS)
-    try:
-        began = datetime.fromisoformat(str(start))
-    except ValueError:
-        return float(QUOTA_PERIOD_DAYS)
-    if began.tzinfo is None:
-        began = began.replace(tzinfo=timezone.utc)
-    elapsed = (now - began).total_seconds() / 86400.0
-    left = QUOTA_PERIOD_DAYS - elapsed
+    if now.month == 12:
+        nxt = now.replace(year=now.year + 1, month=1, day=1,
+                          hour=0, minute=0, second=0, microsecond=0)
+    else:
+        nxt = now.replace(month=now.month + 1, day=1,
+                          hour=0, minute=0, second=0, microsecond=0)
+    left = (nxt - now).total_seconds() / 86400.0
     # Never zero: dividing by it would ask for an infinite per-cycle allowance
-    # on the last day and hand the whole remaining balance to one cycle.
+    # in the last hour of the month and hand the whole balance to one cycle.
     return min(float(QUOTA_PERIOD_DAYS), max(0.5, left))
 
 

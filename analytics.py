@@ -65,6 +65,14 @@ from config import (
     MIN_MARKET_BOOKS,
     MIN_MOVED_BOOKS,
     MIN_SIGNAL_STARS,
+    MOVED_FOR_2_STARS,
+    MOVED_FOR_3_STARS,
+    MOVED_FOR_4_STARS,
+    MAX_STARS,
+    STAR_LABELS,
+    SHARE_CAP_2_STARS,
+    SHARE_CAP_3_STARS,
+    SHARE_CAP_4_STARS,
     MAX_LEAD_HOURS,
     OUTLIER_MAX_DEVIATION_PCT,
 )
@@ -148,20 +156,70 @@ def _pick_sharp_market(by_book: dict) -> tuple:
     return None, {}
 
 
-def _stars(down_books: set, sharp_moved: bool) -> int:
-    """Confidence 0-3, from how BROAD the drop is rather than how big.
+def _stars(down_books: set, sharp_moved: bool, books_count: int = 0) -> int:
+    """Confidence 1-4, from how BROAD the drop is rather than how big.
 
     One bookmaker shortening proves little. The same outcome shortening at many
     independent books inside one polling window is the classic "steam move" --
     informed money hitting the market everywhere at once. A sharp book joining
     counts extra, since those move on money rather than on copying rivals.
+
+        2 stars  >= MOVED_FOR_2_STARS books   "осторожно"
+        3 stars  >= MOVED_FOR_3_STARS books   "уверенно"
+        4 stars  >= MOVED_FOR_4_STARS books   "максимум"
+        +1 star if a sharp book is among them, capped at MAX_STARS
+
+    2026-08-15, and this rung ladder replaced two earlier designs in one day,
+    so the reasoning is worth keeping.
+
+    The first design was this same count rule with a ceiling of three. The
+    second, written a few hours later, made breadth PROPORTIONAL -- a share of
+    the quoting books -- because widening the feed from 25 bookmakers to 75
+    would otherwise inflate every rating: four of seventeen is a quarter of the
+    market turning, four of seventy is three books rounding, and an absolute
+    rule scores them identically. That mattered enormously while the OLD
+    statistics were being continued, because it would have redefined a signal
+    without anything visibly breaking.
+
+    Vladislav then chose the other branch, and it dissolves the problem rather
+    than dodging it: reset the book, and comparability with the old one -- the
+    entire reason the share rule was needed -- stops being a constraint. What
+    is left is that counts are simply the more honest primitive. "Eight
+    independent bookmakers moved the same way inside an hour" is a fact about
+    the world; "11% of the ones we happened to poll" is partly a fact about our
+    subscription.
+
+    The fourth rung is the substantive addition. Publishing only the top rung
+    meant every signal carried identical implied confidence, so no amount of
+    data could ever say whether the weak ones were worth taking. Now every rung
+    from two up is published, labelled, and -- critically -- scored in its own
+    row of the by-stars table, at the SAME notional stake, so a few days from
+    now the question is answered by the record instead of by argument.
+
+    books_count is accepted and unused. It stays in the signature because the
+    proportional rule may well come back once the tiers have been measured, and
+    a caller that already passes the denominator is one less thing to rewire.
     """
     n = len(down_books)
     if n == 0:
         return 0
-    stars = 3 if n >= 4 else (2 if n >= 2 else 1)
+    by_count = (4 if n >= MOVED_FOR_4_STARS
+                else 3 if n >= MOVED_FOR_3_STARS
+                else 2 if n >= MOVED_FOR_2_STARS
+                else 1)
+    # The ceiling only exists once there is a market to take a share OF. With
+    # no denominator (an older caller, a stub) the count stands alone.
+    if books_count:
+        share = n / books_count
+        by_share = (4 if share >= SHARE_CAP_4_STARS
+                    else 3 if share >= SHARE_CAP_3_STARS
+                    else 2 if share >= SHARE_CAP_2_STARS
+                    else 1)
+        stars = min(by_count, by_share)
+    else:
+        stars = by_count
     if sharp_moved:
-        stars = min(3, stars + 1)
+        stars = min(MAX_STARS, stars + 1)
     return stars
 
 
@@ -664,14 +722,20 @@ def build_event_summaries(records: list, spikes: list = None, movements: list = 
                 "drop_pct": drop_pct,
                 "down_count": len(down_books),
                 "sharp_moved": sharp_down,
-                "stars": _stars(down_books, sharp_down),
+                "stars": _stars(down_books, sharp_down, len(prices)),
                 "spiked": (fixture_id, side) in spiked_sides,
                 "thin_market": thin_market,
                 # Breadth, asked properly: did several independent books move
                 # the same way, or is this one trader? A sharp book moving
                 # alone counts -- Pinnacle shortening a price is the reference
                 # the rest of the market follows, not a typo.
-                "well_evidenced": bool(len(down_books) >= MIN_MOVED_BOOKS or sharp_down),
+                # 2026-08-15: the "or sharp_down" escape hatch is gone. It let a
+                # single sharp book open a publication on its own, quietly
+                # defeating MIN_MOVED_BOOKS -- one Pinnacle move became a signal
+                # and landed in the same population as genuine multi-book moves,
+                # spoiling the measurement of both. A sharp book still LIFTS the
+                # rating by a star; it no longer decides whether we speak at all.
+                "well_evidenced": bool(len(down_books) >= MIN_MOVED_BOOKS),
                 "entries": entries[:3],
                 "entry_price": entries[0][1] if entries else None,
                 "entry_book": entries[0][0] if entries else None,
@@ -888,7 +952,8 @@ def _verdict(bet, has_entry, safe=None, optimal=None) -> str:
         else "Пока подвинулась только шарп-контора, а она обычно идёт первой"
         if bet["sharp_moved"] else "Подвинулась пока только одна контора"
     )
-    strength = ("сигнал сильный" if stars >= 3
+    strength = ("сигнал максимальный" if stars >= 4
+                else "сигнал сильный" if stars == 3
                 else "сигнал средний" if stars == 2
                 else "сигнал слабый, может быть и шум")
     parts.append(f"{breadth} — {strength}.")

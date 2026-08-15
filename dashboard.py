@@ -29,6 +29,11 @@ from string import Template
 import analytics
 import storage
 from config import (
+    MOVED_FOR_2_STARS,
+    MOVED_FOR_3_STARS,
+    MOVED_FOR_4_STARS,
+    MAX_STARS,
+    STAR_LABELS,
     DASHBOARD_PATH,
     FLAT_STAKE,
     MATCH_MAX_DURATION_HOURS,
@@ -110,6 +115,64 @@ def _ago(value, now=None) -> str:
     if hours < 24:
         return f"{hours} ч {mins % 60} мин назад"
     return f"{hours // 24} дн назад"
+
+
+# --------------------------------------------------------------------------
+# the confidence ladder
+# --------------------------------------------------------------------------
+# Until 2026-08-15 only the top rung was ever published, so the stars in a row
+# said nothing a reader had to act on -- every row carried the same three of
+# them. Now three rungs are published side by side and the rung is the first
+# judgement the reader makes, which means ★★ must not land on the eye with the
+# same weight as ★★★★.
+#
+# Three cues carry it, deliberately redundant, per the rule at the top of this
+# module that colour never means anything on its own:
+#
+#   * the unlit positions are always drawn, so the mark is a meter -- ★★☆☆ next
+#     to ★★★★ compares itself even in black and white, and the column keeps a
+#     constant width instead of jumping between rows;
+#   * each rung has its own ink -- lime, amber, muted grey;
+#   * the word from STAR_LABELS is printed with it, so the rung can be READ
+#     rather than counted or matched against a legend.
+#
+# The track is markup rather than a CSS ::before, because its length has to
+# follow MAX_STARS and the stylesheet is a static template with no way to
+# interpolate it.
+
+# How many bookmakers each rung needs, for the tooltips. Read from config so a
+# threshold change cannot leave the hint on the chip claiming the old number.
+MOVED_FOR = {2: MOVED_FOR_2_STARS, 3: MOVED_FOR_3_STARS, 4: MOVED_FOR_4_STARS}
+
+
+def _star_mark(stars, *, word: bool = False, stacked: bool = False) -> str:
+    """The rung as a fixed-width star meter, optionally with its label.
+
+    `stacked` puts the word under the stars (the feed's own column, where the
+    cell is narrow and tall); otherwise it sits beside them.
+    """
+    n = max(0, min(MAX_STARS, int(stars or 0)))
+    label = STAR_LABELS.get(n, "")
+    read = f"{n} из {MAX_STARS}" + (f" — {label}" if label else "")
+    lab = f"<span class='st-lab'>{html.escape(label)}</span>" if (word and label) else ""
+    cls = f"stars s{n}" + (" stack" if stacked else "")
+    return (
+        f"<span class='{cls}' title='{read}'>"
+        f"<span class='st' aria-hidden='true'><span class='trk'>{'★' * MAX_STARS}</span>"
+        f"<span class='fill'>{'★' * n}</span></span>{lab}"
+        f"<span class='sr'>{read}</span></span>"
+    )
+
+
+def _stars_cell(stars) -> str:
+    """First column of every table that lists signals."""
+    return f"<td class='c-stars'>{_star_mark(stars, word=True, stacked=True)}</td>"
+
+
+def _rung_of(label: str) -> int:
+    """Rung number out of a stored bucket key like "3★"."""
+    m = re.match(r"\s*(\d+)", str(label))
+    return int(m.group(1)) if m else 0
 
 
 # --------------------------------------------------------------------------
@@ -327,7 +390,7 @@ def _movements_table(rows) -> str:
         else:
             mark = "<span class='tag agg'>брать было негде</span>"
         items.append(
-            f"<tr class='row'><td class='c-stars'>{'★' * (r['stars'] or 0)}</td>"
+            f"<tr class='row'>{_stars_cell(r['stars'])}"
             f"<td class='c-ev'><b>{html.escape(event)}</b>"
             f"{_sport_badge(r['sport_key'])}"
             f"<small>{_fmt_start(r['start_time'])} UTC</small></td>"
@@ -451,7 +514,7 @@ def _event_row(s: dict) -> str:
         # hidden behind an animation.
         f"<tr class='row' data-stars='{stars}' data-open='{1 if has_entry else 0}' "
         f"data-strat='{strategy}' data-fresh='{1 if s.get('fresh') else 0}'>"
-        f"<td class='c-stars'>{'★' * stars}<span class='sr'>{stars} из 3</span></td>"
+        f"{_stars_cell(stars)}"
         f"<td class='c-ev'><b>{name}</b>{_sport_badge(s.get('sport_key'))}"
         f"<small>{_fmt_start(s.get('start_time'))} UTC</small>"
         f"{_countdown(s.get('start_time'), s.get('fixture_id'))}{_live_badge(s.get('fixture_id'))}{badge}{res}</td>"
@@ -539,20 +602,40 @@ def _summaries_html(summaries: list, recent_rows=None, limit: int = 120) -> str:
                 "мы не придумываем сигналы, чтобы заполнить место.</p></div>")
 
     nfresh = sum(1 for s in shown if s.get("fresh"))
-    n3 = sum(1 for s in shown if s["stars"] >= 3)
+    # One rung per published confidence level. Before 2026-08-15 only three
+    # stars was ever published, so "★★★" meant "every signal" and the chips
+    # sorted nothing. Now each rung is a real, separately-scored population.
+    n4 = sum(1 for s in shown if s["stars"] >= 4)
+    n3 = sum(1 for s in shown if s["stars"] == 3)
     n2 = sum(1 for s in shown if s["stars"] == 2)
-    n1 = sum(1 for s in shown if s["stars"] == 1)
     nopen = sum(1 for s in shown if s.get("has_entry"))
     nopt = sum(1 for s in shown if s.get("strategy") == "optimal")
 
+    # The three rungs are one question ("насколько уверенно") and the rest are
+    # another, so they are fenced off into their own group instead of sitting
+    # in one undifferentiated row of seven identical pills. Each rung chip
+    # carries the same meter and the same ink as the rows it filters to, so
+    # the chip and the column teach each other.
+    def rung_chip(rung: int, n: int) -> str:
+        return (f"<button class='f fs s{rung}' data-f='{rung}' "
+                f"title='Просело у {MOVED_FOR[rung]} контор и больше'>"
+                f"<span class='st' aria-hidden='true'>"
+                f"<span class='trk'>{'★' * MAX_STARS}</span>"
+                f"<span class='fill'>{'★' * rung}</span></span>"
+                f"{STAR_LABELS[rung]}<span class='n'>{n}</span></button>")
+
+    # The rungs live inside one recessed group rather than being fenced off by
+    # separators: a divider that lands at the end of a wrapped line on a phone
+    # reads as a stray mark, while a group moves and wraps as a single unit at
+    # any width and states outright that these three are one choice.
     filters = (
         "<div class='toolbar'>"
         f"<button class='f active' data-f='all'>Все за сутки<span class='n'>{len(shown)}</span></button>"
         f"<button class='f' data-f='fresh'>Только что<span class='n'>{nfresh}</span></button>"
-        f"<button class='f' data-f='opt'>Оптимальная<span class='n'>{nopt}</span></button>"
-        f"<button class='f' data-f='3'>★★★<span class='n'>{n3}</span></button>"
-        f"<button class='f' data-f='2'>★★<span class='n'>{n2}</span></button>"
-        f"<button class='f' data-f='1'>★<span class='n'>{n1}</span></button>"
+        "<span class='f-group' role='group' aria-label='Ступень доверия'>"
+        + rung_chip(4, n4) + rung_chip(3, n3) + rung_chip(2, n2)
+        + "</span>"
+        + f"<button class='f' data-f='opt'>Оптимальная<span class='n'>{nopt}</span></button>"
         f"<button class='f' data-f='open'>Есть вход<span class='n'>{nopen}</span></button>"
         "</div>"
     )
@@ -632,7 +715,7 @@ def _active_signals(rows) -> str:
             opt_cell = (f"<span class='{cls}'>{txt}</span>"
                         f"<small>{html.escape(_short(str(r['opt_pick']), 34))}</small>")
         items.append(
-            f"<tr class='row'><td class='c-stars'>{'★' * (r['stars'] or 0)}</td>"
+            f"<tr class='row'>{_stars_cell(r['stars'])}"
             f"<td class='c-ev'><b>{html.escape(event)}</b>"
             f"{_sport_badge(r['sport_key'])}"
             f"<small>старт {_fmt_start(r['start_time'])} UTC</small>"
@@ -831,7 +914,7 @@ def _breakdown_block(bd: dict) -> str:
     if not bd or not bd.get("graded"):
         return ""
 
-    def table(title, data, note):
+    def table(title, data, note, *, stars=False, key=False, intro="", flag=""):
         if not data:
             return ""
         rows = []
@@ -840,29 +923,55 @@ def _breakdown_block(bd: dict) -> str:
             wr = f"{v['win_rate']:.0f}%" if v["win_rate"] is not None else "—"
             money = f"{v['profit']:+,.0f}$".replace(",", " ")
             cls = "pos" if v["profit"] > 0 else ("neg" if v["profit"] < 0 else "")
+            # storage keys the rungs as "2★"/"3★"/"4★" -- plain text that says
+            # nothing about which rung is which. Rendered through the same mark
+            # as the feed, a reader can match a row here to the rows up there
+            # without decoding anything.
+            head = _star_mark(_rung_of(label), word=True) if stars else html.escape(label)
             rows.append(
-                f"<tr><td>{html.escape(label)}</td><td class='num'>{v['n']}</td>"
+                f"<tr><td>{head}</td><td class='num'>{v['n']}</td>"
                 f"<td class='num'>{wr}</td>"
                 f"<td class='num {_clv_class(v['clv'] / 100 if v['clv'] is not None else None)}'>{clv}</td>"
                 f"<td class='num {cls}'>{money}</td></tr>"
             )
-        return (f"<div class='bd-card'><h4>{title}</h4>"
+        return (f"<div class='bd-card{' key' if key else ''}'>"
+                f"<h4>{title}{flag}</h4>{intro}"
+                # Every table on the page inherits min-width:720px, and these
+                # three had no scroll box around them -- so on a phone the CLV
+                # and money columns were simply clipped off the side. The one
+                # table that has to answer "стоит ли брать ★★" cannot be the
+                # one a reader on a phone sees only half of.
+                f"<div class='bd-scroll'>"
                 f"<table class='bd'><thead><tr><th>{note}</th><th class='num'>ставок</th>"
                 f"<th class='num'>заход.</th><th class='num'>CLV</th>"
                 f"<th class='num'>флэт ${bd['stake']:.0f}</th></tr></thead>"
-                f"<tbody>{''.join(rows)}</tbody></table></div>")
+                f"<tbody>{''.join(rows)}</tbody></table></div></div>")
+
+    # Sorted strongest rung first rather than by sample size, like every other
+    # place the ladder is drawn -- a table meant to be read as a ladder should
+    # not shuffle its rungs whenever a bucket gets one more bet.
+    by_stars = dict(sorted((bd.get("by_stars") or {}).items(),
+                           key=lambda kv: -_rung_of(kv[0])))
 
     return (
         "<div class='breakdown reveal'>"
         "<h3>ГДЕ РЕЗУЛЬТАТ РАЗЛИЧАЕТСЯ</h3>"
-        f"<p class='bd-cap'>Те же {bd['graded']} сыгравших ставки, разрезанные три раза. "
-        "Средняя цифра по всему журналу прячет именно то, что стоит знать: разные "
-        "виды спорта и разные по величине падения ведут себя по-разному и в среднем "
-        "гасят друг друга. Смотри на колонку «ставок» — почти везде её пока слишком "
+        f"<p class='bd-cap'>Те же {bd['graded']} сыгравших ставки, разрезанные три раза — "
+        "и первый разрез, по ступеням доверия, теперь главный. Средняя цифра по всему "
+        "журналу прячет именно то, что стоит знать: разные ступени, разные виды спорта и "
+        "разные по величине падения ведут себя по-разному и в среднем гасят друг друга. "
+        "Смотри на колонку «ставок» — почти везде её пока слишком "
         "мало, чтобы делать вывод, и это честная часть картины.</p>"
+        + table("По звёздам", by_stars, "ступень", stars=True, key=True,
+                flag="<span class='bd-flag'>главный разрез</span>",
+                intro="<p class='bd-why'>Единственная таблица, которая отвечает, "
+                      "стоит ли вообще брать слабые сигналы. Все ступени считаются "
+                      f"<b>одинаковой суммой</b> — по ${bd['stake']:.0f} на сигнал, "
+                      "ставка не растёт вместе с уверенностью, — поэтому строки "
+                      "сравнимы между собой напрямую: разница в последней колонке "
+                      "это разница сигналов, а не разного размера ставок.</p>")
         + table("По дисциплине", bd.get("by_sport"), "спорт")
         + table("По величине падения", bd.get("by_drop"), "падение")
-        + table("По звёздам", bd.get("by_stars"), "уверенность")
         + "</div>"
     )
 
@@ -898,10 +1007,11 @@ def _counterfactual_block(cf: dict) -> str:
         "давали. Это не предложение поменять правила: на такой выборке любая строка "
         "может оказаться случайностью. Смысл в том, чтобы отрезанное продолжало "
         "считаться — иначе решение «2★ не нужны» уже никогда не проверить.</p>"
+        "<div class='bd-scroll'>"
         "<table class='bd'><thead><tr><th>правило</th><th class='num'>ставок</th>"
         "<th class='num'>заход.</th><th class='num'>итог</th>"
         "<th class='num'>доходность</th></tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody></table></div>"
+        f"<tbody>{''.join(rows)}</tbody></table></div></div>"
     )
 
 
@@ -1026,7 +1136,7 @@ def _resolved_table(stats: dict) -> str:
         new_p = f"{r['new_price']:.2f}" if r["new_price"] else "—"
         entry = f"{r['entry_price']:.2f}" if r["entry_price"] else "—"
         rows.append(
-            f"<tr><td class='c-stars'>{'★' * (r['stars'] or 0)}</td>"
+            f"<tr>{_stars_cell(r['stars'])}"
             f"<td><b>{html.escape(event)}</b></td>"
             f"<td>{html.escape(r['outcome_name'] or '')}</td>"
             f"<td class='mono'>{old_p} → {new_p}</td>"
@@ -1181,7 +1291,7 @@ def _last_bets(bets, limit: int = 10) -> str:
     for b in bets[:limit]:
         home, away = b["home_team"], b["away_team"]
         event = f"{home} — {away}" if home and away else str(b["fixture_id"])
-        stars = "★" * (b["stars"] or 0)
+        stars = _star_mark(b["stars"], word=True)
         entry = _settled_price(b)
         score = _score_text(b["fixture_id"])
         score_html = f"<span class='b-score'>{score}</span>" if score else ""
@@ -1193,7 +1303,7 @@ def _last_bets(bets, limit: int = 10) -> str:
                      if score else "")
         items.append(
             "<details class='bet'><summary>"
-            f"<span class='b-left'><span class='c-stars'>{stars}</span>"
+            f"<span class='b-left'>{stars}"
             f"<span class='b-name'>{html.escape(event)}{_sport_badge(b['sport_key'])}{score_html}</span>"
             f"<span class='b-pick'>{html.escape(b['outcome_name'] or '')} @ {entry}</span></span>"
             f"{status}</summary>"
@@ -1418,7 +1528,22 @@ body::after{
 .bd-cap{margin:0 0 14px;font-size:12.5px;line-height:1.55;color:var(--ink2)}
 .bd-card{margin:0 0 14px}
 .bd-card h4{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink2);margin:0 0 6px}
-table.bd{width:100%;border-collapse:collapse;font-size:13px}
+/* The by-stars cut is not one of three equals any more: it is the table that
+   answers whether the two-star rung is worth taking at all, so it is lifted
+   out of the stack instead of being third in a list of look-alikes. */
+.bd-card.key{background:var(--card2);border:1px solid rgba(200,255,46,.24);border-radius:13px;
+  padding:14px 15px 6px;margin:0 0 18px}
+.bd-card.key h4{color:var(--lime);font-size:13.5px;display:flex;flex-wrap:wrap;align-items:center;gap:9px}
+.bd-flag{padding:2px 7px;border-radius:6px;background:rgba(200,255,46,.13);color:var(--lime);
+  border:1px solid rgba(200,255,46,.35);font-size:9px;font-weight:800;letter-spacing:.08em}
+.bd-why{margin:0 0 11px;font-size:12.5px;line-height:1.55;color:var(--ink2);max-width:78ch}
+.bd-why b{color:var(--ink)}
+.bd-card.key table.bd td{padding-top:9px;padding-bottom:9px}
+.bd-card.key table.bd td:first-child{width:1%;white-space:nowrap;padding-right:16px}
+.bd-scroll{overflow-x:auto}
+/* Overrides the page-wide table min-width of 720px, which these narrow
+   five-column tables never needed and which used to push them off a phone. */
+table.bd{width:100%;min-width:470px;border-collapse:collapse;font-size:13px}
 table.bd th{text-align:left;font-weight:600;color:var(--ink2);font-size:11.5px;
   text-transform:uppercase;letter-spacing:.04em;padding:0 8px 6px 0;border-bottom:1px solid var(--line)}
 table.bd td{padding:7px 8px 7px 0;border-bottom:1px solid var(--line)}
@@ -1438,6 +1563,13 @@ h2 .hash{color:var(--lime);margin-right:8px}
 .how li i{font-style:normal;width:28px;height:28px;border-radius:9px;display:grid;place-items:center;
   background:rgba(200,255,46,.1);color:var(--lime);font-weight:800;font-size:13px;font-family:var(--mono)}
 .how li b{color:var(--ink)}
+/* The ladder is spelled out with the same marks the rows carry, so the method
+   section is where a reader learns the code rather than a second place that
+   describes it in words alone. */
+.rungs{list-style:none;display:grid;gap:8px;margin:10px 0 10px;padding:0}
+.rungs li{display:flex;align-items:center;gap:10px;font-size:13.5px;color:var(--ink3)}
+.rungs li b{font-family:var(--mono);font-weight:700;color:var(--ink2)}
+.rungs .stars{width:158px;flex:none}
 .books{list-style:none;margin:10px 0 0;padding:0;display:grid;gap:8px}
 .books li{display:grid;grid-template-columns:20px 1fr 64px 30px;align-items:center;gap:9px;font-size:13.5px}
 .books .rk{color:var(--ink3);font-family:var(--mono);font-size:12px}
@@ -1447,14 +1579,56 @@ h2 .hash{color:var(--lime);margin-right:8px}
 .books .ct{text-align:right;font-family:var(--mono);color:var(--ink2);font-size:12.5px}
 .none,.kpi-note{color:var(--ink3);font-size:13px}
 
+/* ------------------------------------------------------ confidence ladder */
+/* A meter, not a string of glyphs: the unlit track is always drawn, so two
+   stars visibly occupy half the ladder and the column keeps one width no
+   matter which rung a row is on. Colour is the second cue and the word from
+   STAR_LABELS the third -- the mark still ranks itself printed in grey. */
+.stars{display:inline-flex;align-items:center;gap:7px;line-height:1;position:relative;white-space:nowrap}
+.stars.stack{display:inline-block}
+.st{position:relative;display:inline-block;font-size:13px;letter-spacing:1.6px;line-height:1;
+  vertical-align:middle;flex:none}
+.st .trk{color:var(--line2)}
+.st .fill{position:absolute;left:0;top:0;letter-spacing:inherit;overflow:hidden;white-space:nowrap}
+.st-lab{display:inline-block;padding:2px 6px;border-radius:6px;vertical-align:middle;
+  font-size:9px;font-weight:800;letter-spacing:.07em;text-transform:uppercase;line-height:1.3;
+  white-space:nowrap;border:1px solid transparent}
+.stars.stack .st-lab{display:block;margin-top:6px}
+.s4 .fill{color:var(--lime);text-shadow:0 0 13px rgba(200,255,46,.5)}
+.s4 .st-lab{background:rgba(200,255,46,.13);color:var(--lime);border-color:rgba(200,255,46,.4)}
+.s3 .fill{color:var(--warn)}
+.s3 .st-lab{background:rgba(255,197,49,.11);color:var(--warn);border-color:rgba(255,197,49,.34)}
+.s2 .fill{color:var(--ink2)}
+.s2 .st-lab{background:rgba(255,255,255,.045);color:var(--ink3);border-color:var(--line2)}
+.s1 .fill,.s0 .fill{color:var(--ink3)}
+
 /* ------------------------------------------------------------------ feed */
-.toolbar{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}
+.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 14px}
 .f{cursor:pointer;font:inherit;font-size:13px;font-weight:600;color:var(--ink2);
   background:var(--card);border:1px solid var(--line);border-radius:999px;padding:8px 13px;
   display:inline-flex;align-items:center;gap:7px;transition:.16s}
 .f:hover{border-color:var(--line2);color:var(--ink)}
 .f.active{background:var(--lime);color:#0b0b06;border-color:var(--lime)}
 .f .n{font-family:var(--mono);font-size:11px;opacity:.75}
+/* The rung chips sit in one recessed group: they answer a single question
+   ("насколько уверенно"), the others answer different ones, and seven
+   identical pills in a row made that impossible to see. */
+/* 22px rather than 999px: on one line it still reads as a pill, and when the
+   group wraps on a phone it stays a tidy rounded box instead of a stadium. */
+.f-group{display:inline-flex;flex-wrap:wrap;gap:6px;padding:4px;border-radius:22px;
+  background:rgba(255,255,255,.028);border:1px solid var(--line)}
+.f.fs{padding-left:11px}
+.f.fs .st{font-size:12px}
+.f.s4{border-color:rgba(200,255,46,.3)}
+.f.s3{border-color:rgba(255,197,49,.28)}
+.f.s2{border-color:var(--line2)}
+.f.s4:hover{border-color:var(--lime);color:var(--ink)}
+.f.s3:hover{border-color:var(--warn);color:var(--ink)}
+.f.s4.active{background:var(--lime);border-color:var(--lime);color:#0b0b06}
+.f.s3.active{background:var(--warn);border-color:var(--warn);color:#0b0b06}
+.f.s2.active{background:var(--ink2);border-color:var(--ink2);color:#0b0b06}
+.f.active .fill{color:#0b0b06;text-shadow:none}
+.f.active .trk{color:rgba(11,11,6,.26)}
 .feed-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:var(--r);background:var(--card)}
 table{border-collapse:collapse;width:100%;min-width:720px}
 th{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink3);font-weight:700;
@@ -1462,7 +1636,11 @@ th{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink3)
 td{padding:13px 14px;border-bottom:1px solid var(--line);vertical-align:middle;font-size:14.5px}
 tr:last-child td{border-bottom:0}
 tbody tr:hover td,table tr.row:hover td{background:rgba(255,255,255,.022)}
-.c-stars{color:var(--warn);white-space:nowrap;letter-spacing:1px;font-size:13px}
+/* width:1% is the auto-layout way of saying "as narrow as the content allows":
+   the cell then sizes itself to four stars plus the longest label instead of
+   to a hard-coded number that a fifth rung or a longer word would break. The
+   old rule sized it by three bare glyphs and nothing else. */
+.c-stars{white-space:nowrap;width:1%;padding-right:8px;vertical-align:top;padding-top:15px}
 .c-ev b{display:block;font-weight:600}
 .c-ev small{display:block;color:var(--ink3);font-size:11.5px;font-family:var(--mono)}
 .cd-to{display:inline-block;margin-top:4px;font-size:11px;font-weight:700;font-family:var(--mono);padding:2px 7px;border-radius:6px;background:rgba(74,217,255,.1);color:var(--cy);white-space:nowrap}
@@ -1554,6 +1732,7 @@ ul.mini li:last-child{border-bottom:0;padding-bottom:0}
 .bet summary::-webkit-details-marker{display:none}
 .bet[open]{border-color:var(--line2)}
 .b-left{display:flex;align-items:center;gap:10px;min-width:0}
+.b-left .stars{flex:none}
 .b-name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .b-pick{color:var(--ink3);font-size:12.5px;white-space:nowrap}
 .b-body{padding:0 15px 14px}
@@ -1591,6 +1770,18 @@ footer a{color:var(--ink2)}
   .kpis{grid-template-columns:repeat(2,1fr)}
   .wrap{padding:0 14px 70px}
   .nav a.link{display:none}
+  /* The settled-bets row is one line on a phone and the event name needs it:
+     the meter alone still ranks the rung, and the word stays in the title. */
+  .b-left .st-lab{display:none}
+  /* Stacking the word under the stars saves ~60px in the first column, which
+     is exactly what the by-stars table needs to fit a phone outright instead
+     of hiding its money column behind a sideways scroll nobody discovers. */
+  .bd-card .stars{display:inline-block}
+  .bd-card .st-lab{display:block;margin-top:5px}
+  .breakdown{padding:14px 12px}
+  .bd-card.key{padding:12px 11px 6px}
+  table.bd{min-width:0;font-size:12px}
+  table.bd th{font-size:10.5px}
 }
 @media (prefers-reduced-motion:reduce){
   *{animation:none!important;transition:none!important}
@@ -1684,7 +1875,9 @@ $ticker
     <div class="kpi cy reveal"><b data-count="$cov_signals">$cov_signals_txt</b><span>сигналов со входом</span></div>
   </section>
   <p class="kpi-note">Всё посчитано по тому, что реально легло в базу за $span_label — без оценок
-  и множителей. Прямо сейчас открытых входов: <b>$hero_open</b>, из них на три звезды: <b>$hero_stars</b>.</p>
+  и множителей. Прямо сейчас открытых входов: <b>$hero_open</b>, из них на ступени
+  «уверенно» (★★★) и выше: <b>$hero_stars</b> — остальные помечены «осторожно» и стоят тут
+  на тех же правах, чтобы их можно было пересчитать.</p>
   $funnel_block
 
   <h2 id="feed"><span class="hash">#</span>Сигналы</h2>
@@ -1717,13 +1910,28 @@ $ticker
         <li><i>02</i><span>Ищем исход, у которого цена <b>упала</b>. Падение — это деньги.
           Противоположную сторону не трогаем никогда: она подорожала механически,
           просто потому что деньги пошли против неё.</span></li>
-        <li><i>03</i><span>Считаем, <b>у скольких контор</b> просело. Одна контора — может быть
-          чья-то разовая ставка или ошибка трейдера. Много независимых контор за один
-          срез — это уже информированные деньги. Отсюда звёзды.</span></li>
-        <li><i>04</i><span>Находим конторы, которые <b>ещё не подвинулись</b>, и показываем
+        <li><i>03</i><span>Считаем, <b>сколько независимых контор</b> просело за один срез.
+          Одна — может быть чья-то разовая ставка или ошибка трейдера. Отсюда звёзды,
+          и это же уровень доверия — ровно те метки, которыми помечена каждая строка выше:
+          <ul class="rungs">
+            <li><span class="stars s4"><span class="st" aria-hidden="true"><span class="trk">★★★★</span><span
+              class="fill">★★★★</span></span><span class="st-lab">максимум</span></span>— от <b>$moved_4</b> контор</li>
+            <li><span class="stars s3"><span class="st" aria-hidden="true"><span class="trk">★★★★</span><span
+              class="fill">★★★</span></span><span class="st-lab">уверенно</span></span>— от <b>$moved_3</b> контор</li>
+            <li><span class="stars s2"><span class="st" aria-hidden="true"><span class="trk">★★★★</span><span
+              class="fill">★★</span></span><span class="st-lab">осторожно</span></span>— от <b>$moved_2</b> контор</li>
+          </ul>
+          Шарп-контора среди них добавляет звезду: такие двигают линию на деньгах,
+          а не переписывая соседей. Одна звезда не публикуется вовсе.</span></li>
+        <li><i>04</i><span>Публикуем <b>все три уровня</b>, а не только верхний, и считаем
+          каждый отдельно — <b>одинаковой суммой</b>. Ставить на сильные сигналы больше
+          выглядит логично, но убило бы измерение: прибыль показывала бы схему ставок,
+          а не силу сигнала. Сначала честно меряем, потом решаем, кому давать больше.
+          Таблица «по звёздам» ниже и есть этот ответ.</span></li>
+        <li><i>05</i><span>Находим конторы, которые <b>ещё не подвинулись</b>, и показываем
           цену там. Это и есть ставка. Если не подвинулась ни одна — честно пишем,
           что вход закрыт.</span></li>
-        <li><i>05</i><span>Если коэффициент выше $safe_trigger, отдельно считаем
+        <li><i>06</i><span>Если коэффициент выше $safe_trigger, отдельно считаем
           <b>безопасный вариант</b>: в футболе это двойной шанс, собранный из той же линии,
           в теннисе и киберспорте — фора.</span></li>
       </ul>
@@ -2025,6 +2233,9 @@ def render_dashboard(summaries: list, quota: dict = None):
         sports_word=_plural(cov.get("sports") or 0, "дисциплина", "дисциплины", "дисциплин"),
         hero_open=sum(1 for s in summaries if s.get("has_entry")),
         hero_stars=sum(1 for s in summaries if s.get("stars", 0) >= 3),
+        moved_2=MOVED_FOR_2_STARS,
+        moved_3=MOVED_FOR_3_STARS,
+        moved_4=MOVED_FOR_4_STARS,
         # The formatted value is rendered server-side and the count-up merely
         # animates up to it -- so a browser that never runs the script still
         # shows the real figure instead of a row of zeroes.

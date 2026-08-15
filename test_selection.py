@@ -38,7 +38,10 @@ def build(books_moved, price_old, price_new, entry_price, lead_hours, sharp=Fals
                 "market_id": "h2h", "outcome_id": side, "outcome_name": "Riga II",
                 "player_key": "-", "price": price}
 
-    movers = ["unibet_eu", "betsson", "williamhill", "bwin", "coolbet"][:books_moved]
+    pool = ["unibet_eu", "betsson", "williamhill", "bwin", "coolbet",
+            "leovegas", "betclic", "tipico", "winamax", "marathonbet",
+            "codere", "suprabets", "gtbets", "everygame", "888sport"]
+    movers = pool[:books_moved]
     if sharp:
         movers[0] = "pinnacle"
     records, moves = [], []
@@ -54,32 +57,73 @@ def build(books_moved, price_old, price_new, entry_price, lead_hours, sharp=Fals
 
 
 # --- the baseline: everything in order, must still publish -------------------
-ok = build(books_moved=4, price_old=3.20, price_new=2.80, entry_price=3.15,
-           lead_hours=6)
-assert ok, "a clean four-book steam move produced no summary at all"
+ok = build(books_moved=config.MOVED_FOR_3_STARS, price_old=3.20, price_new=2.80,
+           entry_price=3.15, lead_hours=6)
+assert ok, "a clean steam move produced no summary at all"
 s = ok[0]
 assert s["stars"] == 3, s["stars"]
 assert s["alertable"], f"a textbook signal was rejected: {s['verdict']}"
 assert s["funnel_bucket"] == "signal", s["funnel_bucket"]
-print(f"baseline ok: 4 books, {s['stars']}★, вход {s['bet']['entry_price']:.2f}, публикуем")
+print(f"baseline ok: {config.MOVED_FOR_3_STARS} контор, {s['stars']}★, "
+      f"вход {s['bet']['entry_price']:.2f}, публикуем")
 
-# a sharp book counts double, so two books INCLUDING pinnacle is still 3 stars
-sharp = build(books_moved=2, price_old=3.20, price_new=2.80, entry_price=3.15,
+# each rung must be reachable end-to-end, not just inside _stars()
+for moved, want in ((config.MOVED_FOR_2_STARS, 2),
+                    (config.MOVED_FOR_3_STARS, 3),
+                    (config.MOVED_FOR_4_STARS, 4)):
+    r = build(books_moved=moved, price_old=3.20, price_new=2.80,
+              entry_price=3.15, lead_hours=6)
+    assert r[0]["stars"] == want, (moved, want, r[0]["stars"])
+    assert r[0]["alertable"], (moved, r[0]["verdict"])
+print("ступени ok: 2★/3★/4★ доходят до публикации через весь конвейер")
+
+# a sharp book lifts by one rung -- but on its own it must NOT open publication
+sharp = build(books_moved=config.MOVED_FOR_2_STARS, price_old=3.20,
+              price_new=2.80, entry_price=3.15, lead_hours=6, sharp=True)
+assert sharp[0]["stars"] == 3, sharp[0]["stars"]
+alone = build(books_moved=1, price_old=3.20, price_new=2.80, entry_price=3.15,
               lead_hours=6, sharp=True)
-assert sharp[0]["stars"] == 3 and sharp[0]["alertable"], sharp[0]["stars"]
-print("baseline ok: две конторы, но одна из них Pinnacle — это те же 3★")
+assert not alone[0]["alertable"], "одна шарп-контора открыла публикацию в одиночку"
+print("baseline ok: шарп поднимает на ступень, но в одиночку не публикует")
 
-# --- gate 1: fewer than three stars -----------------------------------------
-weak = build(books_moved=2, price_old=3.20, price_new=2.80, entry_price=3.15,
+# --- gate 1: below the publishing floor -------------------------------------
+# 2026-08-15: the floor moved from three stars to two. Two stars is now a
+# PUBLISHED tier, labelled "осторожно" and scored in its own row, so the gate
+# this guards is one star -- a single bookmaker moving, which is not evidence
+# of anything and must never reach the bot however the ladder is retuned.
+solo = build(books_moved=1, price_old=3.20, price_new=2.80, entry_price=3.15,
              lead_hours=6)
-assert weak, "a two-star move must still be RECORDED"
-assert weak[0]["stars"] == 2, weak[0]["stars"]
-assert not weak[0]["alertable"], "a two-star signal was published"
-assert weak[0]["funnel_bucket"] == "low_stars", weak[0]["funnel_bucket"]
+assert solo, "a single-book move must still be RECORDED"
+assert not solo[0]["alertable"], "a single-book move was published"
+assert solo[0]["funnel_bucket"] == "thin_market", solo[0]["funnel_bucket"]
+print("звёзды ok: одна контора — не рынок, в публикацию не идёт")
+
+# THE QUALITY GATE ITSELF. Between MIN_MOVED_BOOKS and MOVED_FOR_2_STARS lies
+# the band where a move is real enough to write down and too thin to bet. Until
+# the analyst's recalibration these two numbers coincided, which made the
+# low_stars bucket unreachable -- everything that survived "at least two books"
+# published automatically, so there was no quality filter left anywhere in the
+# pipeline. This assertion is what keeps that gap open.
+assert config.MIN_MOVED_BOOKS < config.MOVED_FOR_2_STARS
+thin = build(books_moved=config.MIN_MOVED_BOOKS, price_old=3.20, price_new=2.80,
+             entry_price=3.15, lead_hours=6)
+assert thin[0]["stars"] == 1, thin[0]["stars"]
+assert not thin[0]["alertable"], "движение ниже нижней ступени было опубликовано"
+assert thin[0]["funnel_bucket"] == "low_stars", thin[0]["funnel_bucket"]
 assert analytics.LAST_FUNNEL["low_stars"] == 1, analytics.LAST_FUNNEL
 # and it must still reach the movements ledger, or we would be hiding it
-assert storage.save_movement(weak[0], now.isoformat()), "a skipped tier vanished entirely"
-print("звёзды ok: 2★ пишем в движения, но не публикуем как сигнал")
+assert storage.save_movement(thin[0], now.isoformat()), "a skipped tier vanished entirely"
+print(f"звёзды ok: {config.MIN_MOVED_BOOKS} конторы пишем в движения, но не "
+      f"публикуем — фильтр по качеству работает")
+
+# ...and the rung immediately above MUST publish. This is the change that is
+# supposed to multiply the sample, so it gets its own assertion.
+careful = build(books_moved=config.MOVED_FOR_2_STARS, price_old=3.20,
+                price_new=2.80, entry_price=3.15, lead_hours=6)
+assert careful[0]["stars"] == 2, careful[0]["stars"]
+assert careful[0]["alertable"], "2★ обязаны публиковаться после 15.08"
+assert careful[0]["funnel_bucket"] == "signal", careful[0]["funnel_bucket"]
+print("звёзды ok: 2★ «осторожно» публикуем — это и есть рост объёма")
 
 # --- gate 2: the price band -------------------------------------------------
 # Above the band the market is filtered out upstream too, so the event does not
