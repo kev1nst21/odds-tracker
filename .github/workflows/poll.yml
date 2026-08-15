@@ -99,12 +99,27 @@ jobs:
       #        would make every number on the page mean nothing.
       # Schema changes do NOT justify a bump -- new columns arrive through
       # storage._migrate(). Only a change to what counts as a signal does.
+      #   -v6- (2026-08-15) full restart, asked for explicitly: "всё-таки
+      #        сбрасывать всю статистику с нуля, сбрасывать все ставки, всё что
+      #        мы вели это всё время, и запускаться по новой". Unlike some
+      #        earlier bumps this one is unarguable -- three separate things
+      #        changed what a row in that table means, on the same day:
+      #          * the confidence scale went from three rungs to four, and the
+      #            counts behind each rung were re-cut;
+      #          * the publishing floor dropped from three stars to two, so the
+      #            table now contains a population it never contained before;
+      #          * the feed widened from ~25 bookmakers (eu) to ~75
+      #            (eu+uk+au+us), which moves every breadth count upward for
+      #            the same real-world move.
+      #        Any one of those makes old and new rows incomparable. Averaging
+      #        them together would produce a win rate that describes no
+      #        strategy that was ever run.
       - name: Restore odds history DB
         uses: actions/cache@v4
         with:
           path: data
-          key: odds-history-v5-${{ github.run_id }}
-          restore-keys: odds-history-v5-
+          key: odds-history-v6-${{ github.run_id }}
+          restore-keys: odds-history-v6-
 
       - run: pip install -r requirements.txt
 
@@ -123,6 +138,13 @@ jobs:
           python test_baseline_gap.py
           python test_consistency.py
           python test_budget.py
+          # Added 2026-08-15 at Vladislav's request -- "пусть наши тестировщики
+          # прогоняют логику написанного на сайте и логику вообще проекта".
+          # The first pins the meaning of a signal so the region expansion
+          # cannot silently redefine it; the second pins every rule the page
+          # states in prose to the constant that governs it.
+          python test_stars_invariance.py
+          python test_site_claims.py
 
       - name: Poll the market for this window
         env:
