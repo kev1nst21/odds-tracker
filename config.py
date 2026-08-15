@@ -615,7 +615,14 @@ PUBLISH_INTERVAL_MINUTES = int(os.getenv("PUBLISH_INTERVAL_MINUTES")
 # zero mid-month and loses the ability to grade results -- but at 1500 it was
 # holding back a fifth of the remaining budget, which at the current burn is
 # several days of coverage. 800 still leaves room to settle every open bet.
-QUOTA_RESERVE_CREDITS = int(os.getenv("QUOTA_RESERVE_CREDITS", "800"))
+# 2026-08-15, lowered 800 -> 250 deliberately and temporarily. The balance hit
+# 650, i.e. under the reserve, which would have frozen the tracker completely
+# while a plan upgrade was being paid for. With the governor now sizing each
+# cycle to the floor (six leagues, six credits) 250 still covers several days
+# of result-grading, and a narrow live tracker is worth far more than a wide
+# frozen one. PUT THIS BACK TO 800 once the bigger plan lands -- on a 5M plan
+# the reserve costs nothing and the protection is free.
+QUOTA_RESERVE_CREDITS = int(os.getenv("QUOTA_RESERVE_CREDITS", "250"))
 
 # --- The credit governor (2026-08-15) --------------------------------------
 # MAX_SPORTS_PER_CYCLE above stopped being a promise and became an AMBITION:
