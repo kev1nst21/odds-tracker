@@ -163,6 +163,35 @@ MATCH_MAX_DURATION_HOURS = float(os.getenv("MATCH_MAX_DURATION_HOURS", "4"))
 # covered by The Odds API at all -- a real coverage loss, but Pinnacle is
 # still the single most important sharp reference book, so this is an
 # acceptable trade for going from a 250/month quota to a usable one.
+#
+# 2026-08-15. Region is the ONLY lever that adds bookmakers, and the funnel
+# says bookmakers are now the binding constraint: of the ten movements that
+# failed to become signals in 24 hours, four died as "просело у всех" (no book
+# left holding the old price) and three as "вход не дотянул" (the best
+# remaining price was below the entry rule). Both are shortages of books, not
+# of movement. More books means more laggards, and a laggard IS the bet.
+#
+# What each region is worth here, from the published bookmaker list
+# (checked 2026-08-15). Cost is multiplicative: every region multiplies the
+# bill for EVERY sport key polled, so this is the expensive lever.
+#   eu  ~25 books, incl. Pinnacle, 1xBet, Marathon Bet, Betsson, Unibet -- the
+#       sharp reference books live here. Non-negotiable, always first.
+#   uk  ~20 books, of which ~15 exist nowhere else: Sky Bet, Paddy Power,
+#       Coral, Ladbrokes, William Hill, Betfred, BoyleSports, Bet Victor.
+#       Serious soccer and tennis books. Best value after eu.
+#   au  ~13 books and the only place BET365 appears -- the largest book in the
+#       world by turnover, and absent from eu entirely. Also SportsBet, Neds,
+#       TAB. Worth a region on bet365 alone.
+#   us  ~17 books (DraftKings, FanDuel, BetMGM, Caesars). US-shaped: deep on
+#       US sports, thinner and slower on European soccer. Buy last.
+#   se, fr  heavy overlap with eu (Betsson, NordicBet, LeoVegas, Unibet,
+#       Winamax). Poor value -- they cost a full multiple for a handful of
+#       books we already see.
+#
+# Stake, BetBoom, Fonbet and SBOBET are NOT on this provider at any price --
+# confirmed against the full published list. Asking for them here is not a
+# configuration problem, it is a provider problem; see README for the
+# OddsPapi route.
 REGIONS = os.getenv("THEODDSAPI_REGIONS", "eu")
 
 # h2h = moneyline/1X2. Extra markets (spreads, totals) each multiply the
@@ -225,7 +254,16 @@ WIDE_GROUPS = [g.strip() for g in
 # touching what counts as one: same threshold, same stars, same price band,
 # just a bigger field. Costs credits linearly, which the user accepted
 # ("не бойся, мы если что докупим кредитов").
-MAX_SPORTS_PER_CYCLE = int(os.getenv("MAX_SPORTS_PER_CYCLE", "15"))
+# 2026-08-15, raised 15 -> 60 and simultaneously demoted from a cap to an
+# AMBITION. It is now safe to ask for more than we can pay for, because
+# budget.py hands back what the balance actually affords and this number is
+# only the ceiling it may not exceed. Sixty covers essentially the whole
+# in-season soccer + tennis list in one or two cycles instead of a four-hour
+# lap, which also puts every league comfortably inside the baseline window --
+# breadth and measurability improving together for once. On today's balance
+# the governor will still hand back six; on a bigger plan it hands back sixty
+# the same hour, with no commit.
+MAX_SPORTS_PER_CYCLE = int(os.getenv("MAX_SPORTS_PER_CYCLE", "60"))
 
 # The wide list is bigger than one cycle's budget, so it is walked in slices:
 # each cycle takes the next MAX_SPORTS_PER_CYCLE - len(core) keys and the
@@ -578,6 +616,35 @@ PUBLISH_INTERVAL_MINUTES = int(os.getenv("PUBLISH_INTERVAL_MINUTES")
 # holding back a fifth of the remaining budget, which at the current burn is
 # several days of coverage. 800 still leaves room to settle every open bet.
 QUOTA_RESERVE_CREDITS = int(os.getenv("QUOTA_RESERVE_CREDITS", "800"))
+
+# --- The credit governor (2026-08-15) --------------------------------------
+# MAX_SPORTS_PER_CYCLE above stopped being a promise and became an AMBITION:
+# budget.py recomputes the real cap every cycle from the credits the API says
+# are left, so a number set here can no longer overspend the plan. See the
+# module docstring there for why a fixed cap failed in both directions inside
+# a single fortnight -- a runaway on the 8th, a starved plan on the 15th.
+#
+# This is also what makes buying a bigger plan a purchase rather than a
+# release: the next cycle reads a larger `remaining`, computes a larger
+# allowance, and widens by itself. No commit, no redeploy.
+AUTO_BUDGET = os.getenv("AUTO_BUDGET", "1") not in ("0", "false", "False")
+
+# Never narrow below this, however little is left. A tracker watching six
+# leagues still detects, still grades, still publishes; one watching zero is
+# indistinguishable from a broken deploy. The hard stop is runner.py's reserve
+# guard, and it should stay the ONLY thing that stops us.
+MIN_SPORTS_PER_CYCLE = int(os.getenv("MIN_SPORTS_PER_CYCLE", "6"))
+
+# The provider's allowance is monthly. The exact reset date is never sent in
+# any header, so budget.observe() infers it: `used` only climbs inside a
+# period, so the moment it falls, a new one has begun.
+QUOTA_PERIOD_DAYS = float(os.getenv("QUOTA_PERIOD_DAYS", "30"))
+
+# Warn to Telegram while there is still time to act. Running out of credits
+# must never first be noticed by a human wondering why the site looks quiet --
+# that is precisely the failure mode that cost two days earlier this month.
+QUOTA_WARN_CREDITS = int(os.getenv("QUOTA_WARN_CREDITS", "2500"))
+QUOTA_WARN_INTERVAL_HOURS = float(os.getenv("QUOTA_WARN_INTERVAL_HOURS", "6"))
 
 # --- Strategy split (user decision, 2026-07-29) ----------------------------
 # Every signal is logged once and then counted under BOTH headings, so the two

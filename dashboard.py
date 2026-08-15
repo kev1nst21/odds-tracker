@@ -1224,6 +1224,14 @@ def _detect_diag() -> dict:
         return {}
 
 
+def _budget_plan() -> dict:
+    """What the credit governor allowed this cycle, as stored by main.py."""
+    try:
+        return json.loads(storage.get_meta("budget_plan") or "{}")
+    except (ValueError, TypeError):
+        return {}
+
+
 def _write_ledger(agg: dict) -> None:
     """Dump every logged signal next to index.html as plain JSON.
 
@@ -1249,6 +1257,11 @@ def _write_ledger(agg: dict) -> None:
         "funnel_24h": storage.funnel_stats(24),
         "entry_threshold_preview": storage.capture_threshold_preview(),
         "detect": _detect_diag(),
+        # The width this cycle could afford, and the arithmetic behind it. A
+        # constraint nobody can see is how the tracker spent a day silent in
+        # August; a constraint that now decides how much market we watch had
+        # better be published rather than inferred from a CI log.
+        "budget": _budget_plan(),
         "count": len(rows),
         "signals": rows,
     }
@@ -1977,10 +1990,23 @@ def render_dashboard(summaries: list, quota: dict = None):
     q = quota or {}
     quota_note = ""
     if q.get("remaining") is not None:
-        per_day = (24 * 60 / max(1, POLL_INTERVAL_MINUTES)) * MAX_SPORTS_PER_CYCLE
-        days = q["remaining"] / per_day if per_day else 0
+        # The burn rate must be built from the width we are ACTUALLY running
+        # at, not from MAX_SPORTS_PER_CYCLE. Since 2026-08-15 that constant is
+        # an ambition the credit governor clamps, so reading it here would
+        # divide the balance by several times the real spend and tell the
+        # reader the plan had hours left when it had days. The dashboard's one
+        # job is that its numbers can be recounted.
+        import budget as _budget
+        plan = _budget.LAST_PLAN or _budget.plan(q.get("remaining"))
+        width = plan.get("sports") or MAX_SPORTS_PER_CYCLE
+        per_sport = plan.get("credits_per_sport") or 1
+        per_day = (24 * 60 / max(1, POLL_INTERVAL_MINUTES)) * width * per_sport
+        usable = max(0, int(q["remaining"]) - (plan.get("reserve") or 0))
+        days = usable / per_day if per_day else 0
+        starved = " — охват на минимуме, план пора расширять" if plan.get("starved") else ""
         quota_note = (f"кредитов осталось {int(q['remaining']):,} "
-                      f"(≈{days:.0f} дн. при текущем темпе) · ").replace(",", " ")
+                      f"(≈{days:.0f} дн. при текущем темпе){starved} · "
+                      f"{width} лиг за цикл по {per_sport} кр. · ").replace(",", " ")
 
     html_out = PAGE.safe_substitute(
         quota_note=quota_note,

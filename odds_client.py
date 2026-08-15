@@ -140,6 +140,24 @@ def select_sport_keys(all_sports: list = None) -> list:
     is only safe because the detector compares against a price from an hour
     ago rather than against the previous cycle, so a league being polled every
     fourth cycle still gets its moves measured correctly.
+
+    2026-08-15: the slice width is no longer MAX_SPORTS_PER_CYCLE itself.
+    budget.plan() turns that constant into an AMBITION and returns what the
+    remaining credits can actually pay for between now and the plan's rollover.
+    A cap the balance cannot fund is not a cap; it is an outage with a
+    two-week fuse, which is exactly what this month demonstrated.
+    """
+    import budget
+    cap = budget.plan(LAST_QUOTA.get("remaining")).get("sports") or MAX_SPORTS_PER_CYCLE
+    return _select_within(all_sports, max(1, int(cap)))
+
+
+def _select_within(all_sports, cap: int) -> list:
+    """The selection proper, with this cycle's affordable width already fixed.
+
+    Split out from select_sport_keys so the rotation logic can be tested
+    against an explicit width instead of against whatever the live credit
+    balance happens to be.
     """
     if all_sports is None:
         all_sports = list_sports()
@@ -153,21 +171,31 @@ def select_sport_keys(all_sports: list = None) -> list:
     core = list(dict.fromkeys(core))
 
     if not WIDE_COVERAGE:
-        return core[:MAX_SPORTS_PER_CYCLE] if MAX_SPORTS_PER_CYCLE else core
+        return core[:cap]
 
     wide = sorted((s["key"] for s in live
                    if s.get("group") in WIDE_GROUPS and s["key"] not in core),
                   key=_obscurity_rank)
     if not wide:
-        return core[:MAX_SPORTS_PER_CYCLE]
+        return core[:cap]
 
     # The wide sweep gets its slots reserved BEFORE the core list is trimmed.
     # Otherwise a busy tennis week fills the whole budget with famous names and
     # the tracker quietly goes back to watching only the efficient markets --
     # which is the exact failure this was written to fix.
-    wide_slots = min(WIDE_MIN_SLOTS, len(wide), MAX_SPORTS_PER_CYCLE)
-    kept_core = core[:max(0, MAX_SPORTS_PER_CYCLE - wide_slots)]
-    wide_slots = max(wide_slots, MAX_SPORTS_PER_CYCLE - len(kept_core))
+    #
+    # ...but the reservation has to cut both ways once the cap can shrink. With
+    # a fixed cap of 15 the old `min(WIDE_MIN_SLOTS, len(wide), cap)` always
+    # left seven slots for the core. Under the credit governor the cap can fall
+    # to six, and that same expression then claimed ALL of them -- silently
+    # dropping every tennis tournament, which is the single most gradeable
+    # thing tracked here, at precisely the moment the tracker could least
+    # afford to stop producing settleable bets. So the core now keeps a third
+    # of a narrow cycle. At the ordinary cap this changes nothing.
+    core_floor = max(1, cap // 3)
+    wide_slots = min(WIDE_MIN_SLOTS, len(wide), max(0, cap - core_floor))
+    kept_core = core[:max(0, cap - wide_slots)]
+    wide_slots = max(wide_slots, cap - len(kept_core))
     wide_slots = min(wide_slots, len(wide))
 
     if not ROTATE_WIDE_COVERAGE:

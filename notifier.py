@@ -257,6 +257,39 @@ def notify_digest(d: dict, dashboard_url: str = None):
     send_telegram_message("\n".join(lines))
 
 
+def notify_credits(d: dict, dashboard_url: str = None):
+    """Say out loud that the plan is running out, while there is time to act.
+
+    The reserve guard in runner.py stops polling before the balance reaches
+    zero. That protects the account and protects nothing else: from the outside
+    a poller that has stopped for want of credit is indistinguishable from a
+    calm market, and this project has already lost two separate multi-day
+    stretches to exactly that ambiguity. A balance about to run out is an
+    event, and events get announced.
+
+    Deliberately concrete about the consequence. "Мало кредитов" tells nobody
+    what to do; saying that the site goes quiet and open bets stop being graded
+    does.
+    """
+    left = d.get("remaining")
+    days = d.get("days_left")
+    lines = [f"⚠️ <b>{BRAND} · кредиты заканчиваются</b>", ""]
+    lines.append(f"Осталось <b>{left:,}</b> кредитов".replace(",", " ")
+                 + (f" — примерно <b>{days:.1f} дн.</b> при текущем темпе."
+                    if days else "."))
+    if d.get("width"):
+        lines.append(f"Опрос уже сужен до {d['width']} лиг за цикл, чтобы дотянуть дольше.")
+    lines.append("")
+    lines.append("Когда кредиты кончатся, опрос остановится: новые сигналы "
+                 "перестанут появляться, а открытые ставки останутся нерассчитанными.")
+    if d.get("plan_hint"):
+        lines.append("")
+        lines.append(f"<i>{html.escape(str(d['plan_hint']))}</i>")
+    if dashboard_url:
+        lines.append(f"\n🌐 {dashboard_url}")
+    send_telegram_message("\n".join(lines))
+
+
 def _format_seen_only(moves: list, limit: int) -> str:
     """Compact list of moves we spotted but did not bet.
 

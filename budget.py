@@ -1,0 +1,210 @@
+"""How much market this cycle is allowed to pay for.
+
+WHY THIS EXISTS. Until now breadth was a constant: MAX_SPORTS_PER_CYCLE sat in
+config.py and the poller spent whatever that implied, month in and month out.
+That is fine while the number is right and catastrophic the moment it is not,
+and it has been wrong in both directions inside a fortnight:
+
+  * 2026-08-08 the chain ran away and spent 3 052 credits in fifty minutes --
+    a month's income in under two days;
+  * 2026-08-15, at the opposite extreme, the plan is down to 1 137 credits with
+    two weeks of the month left, because a cap set for a quiet Tuesday was
+    still in force when the weekend fixtures arrived and every cycle got
+    dearer.
+
+Both are the same bug: a fixed cap cannot know what the plan can afford. So the
+cap stops being a constant and becomes an ANSWER -- recomputed every cycle from
+three things we actually measure: credits the API says are left, how long until
+the plan rolls over, and what one sport currently costs.
+
+    per_cycle = (remaining - reserve) / cycles_left_in_the_period
+    sports    = per_cycle / credits_per_sport
+
+The number in config.py becomes an AMBITION -- the most we would ever want --
+and this module hands back the most we can currently have. Two consequences,
+and they are the whole point:
+
+  * over-spend becomes structurally impossible. Ambition can be set to the
+    entire fixture list and a small plan simply throttles it, instead of
+    burning out on the 9th and going dark for three weeks.
+  * an upgrade needs no code. Buy a bigger plan and the next cycle sees the
+    larger `remaining`, computes a larger allowance and widens by itself --
+    within the hour, without a commit, without me.
+
+The floor matters as much as the ceiling. When credits run low this narrows to
+MIN_SPORTS_PER_CYCLE rather than to zero: a tracker watching six leagues is
+still a tracker, and runner.py's reserve guard is the thing that stops polling
+outright. Degrade, don't die.
+"""
+import math
+from datetime import datetime, timedelta, timezone
+
+from config import (
+    MARKETS,
+    REGIONS,
+    MAX_SPORTS_PER_CYCLE,
+    MIN_SPORTS_PER_CYCLE,
+    QUOTA_RESERVE_CREDITS,
+    QUOTA_PERIOD_DAYS,
+    AUTO_BUDGET,
+)
+
+# What the last cycle worked out, for the dashboard and the digest to read
+# without recomputing it. Same pattern as detector.LAST_DIAG.
+LAST_PLAN = {}
+
+
+def credits_per_sport() -> int:
+    """The Odds API bills markets x regions per sport key, per call.
+
+    Confirmed against the published rule ("cost = [number of markets] x
+    [number of regions]"). This is the single number that makes adding a region
+    expensive: every extra region multiplies EVERY sport we poll, so going from
+    eu to eu,uk doubles the bill for the whole cycle rather than adding a line
+    item.
+    """
+    markets = len([m for m in str(MARKETS).split(",") if m.strip()])
+    regions = len([r for r in str(REGIONS).split(",") if r.strip()])
+    return max(1, markets) * max(1, regions)
+
+
+def _period_days_left(now: datetime) -> float:
+    """Days until the plan's credits reset.
+
+    Nothing in the API says when that happens -- the allowance is monthly from
+    the subscription date, which we are never told. So it is INFERRED: `used`
+    climbs all month and drops when the period rolls over, and observe() below
+    writes down the date it saw that happen. Until a rollover has been seen we
+    assume a whole period is still ahead, which is the conservative direction:
+    it makes the per-cycle allowance smaller, never larger.
+    """
+    import storage
+    start = storage.get_meta("quota_period_start")
+    if not start:
+        return float(QUOTA_PERIOD_DAYS)
+    try:
+        began = datetime.fromisoformat(str(start))
+    except ValueError:
+        return float(QUOTA_PERIOD_DAYS)
+    if began.tzinfo is None:
+        began = began.replace(tzinfo=timezone.utc)
+    elapsed = (now - began).total_seconds() / 86400.0
+    left = QUOTA_PERIOD_DAYS - elapsed
+    # Never zero: dividing by it would ask for an infinite per-cycle allowance
+    # on the last day and hand the whole remaining balance to one cycle.
+    return min(float(QUOTA_PERIOD_DAYS), max(0.5, left))
+
+
+def observe(quota: dict, now: datetime) -> None:
+    """Record what the API just told us, and notice a rollover when it happens.
+
+    `used` only ever climbs inside a billing period, so a fall is the one
+    unambiguous signal that a new period has begun. A small tolerance guards
+    against the counter jittering between two calls in flight.
+    """
+    import storage
+    try:
+        used = int((quota or {}).get("used"))
+    except (TypeError, ValueError):
+        return
+    prev = storage.get_meta("quota_used_seen")
+    try:
+        prev = int(prev) if prev is not None else None
+    except (TypeError, ValueError):
+        prev = None
+    if prev is not None and used < prev - 50:
+        storage.set_meta("quota_period_start", now.isoformat())
+        print(f"[budget] план обновился: использовано было {prev}, стало {used} — "
+              f"новый период начался {now:%d.%m}")
+    elif prev is None and not storage.get_meta("quota_period_start"):
+        # First sighting ever. We do not know where in the month we are, so we
+        # assume the worst (a full period ahead) by leaving the marker unset.
+        pass
+    storage.set_meta("quota_used_seen", str(used))
+
+
+def plan(remaining, now=None, poll_minutes=None) -> dict:
+    """How many sport keys this cycle may buy.
+
+    Returns the whole calculation, not just the number, because a cap that
+    cannot be recounted is exactly the kind of silent constraint that cost us
+    two days in August -- the dashboard and the Telegram digest both print
+    these fields.
+    """
+    from config import POLL_INTERVAL_MINUTES
+    now = now or datetime.now(timezone.utc)
+    poll_minutes = max(1, int(poll_minutes or POLL_INTERVAL_MINUTES))
+    per_sport = credits_per_sport()
+    ambition = max(1, int(MAX_SPORTS_PER_CYCLE or 1))
+    floor = max(1, min(int(MIN_SPORTS_PER_CYCLE or 1), ambition))
+
+    out = {
+        "ambition": ambition,
+        "floor": floor,
+        "credits_per_sport": per_sport,
+        "regions": REGIONS,
+        "poll_minutes": poll_minutes,
+        "remaining": remaining,
+        "reserve": QUOTA_RESERVE_CREDITS,
+    }
+
+    if not AUTO_BUDGET or remaining is None:
+        # No governor, or nothing measured yet (the very first call of a run,
+        # before any response has carried a quota header). Trust the config --
+        # runner.py's reserve guard is still there as the hard stop.
+        out.update({"sports": ambition, "capped": False, "reason": "no-data"})
+        LAST_PLAN.update(out)
+        return out
+
+    try:
+        remaining = int(remaining)
+    except (TypeError, ValueError):
+        out.update({"sports": ambition, "capped": False, "reason": "no-data"})
+        LAST_PLAN.update(out)
+        return out
+
+    days_left = _period_days_left(now)
+    usable = max(0, remaining - QUOTA_RESERVE_CREDITS)
+    cycles_left = max(1.0, days_left * 24 * 60 / poll_minutes)
+    per_cycle = usable / cycles_left
+    # One credit of the cycle goes to overheads that are not sport keys (the
+    # results check, the odd retry), so the division is deliberately floor().
+    affordable = int(per_cycle // per_sport)
+    sports = max(floor, min(ambition, affordable))
+
+    out.update({
+        "days_left": round(days_left, 2),
+        "usable": usable,
+        "cycles_left": int(cycles_left),
+        "per_cycle": round(per_cycle, 1),
+        "affordable": affordable,
+        "sports": sports,
+        "capped": sports < ambition,
+        "starved": affordable < floor,
+        "reason": "budget",
+    })
+    LAST_PLAN.clear()
+    LAST_PLAN.update(out)
+    return out
+
+
+def describe(p: dict = None) -> str:
+    """One line a human can check the arithmetic of."""
+    p = p or LAST_PLAN
+    if not p:
+        return ""
+    if p.get("reason") != "budget":
+        return f"бюджет: {p.get('sports')} лиг/цикл (по конфигу)"
+    line = (f"бюджет: {p['sports']} лиг/цикл из {p['ambition']} желаемых · "
+            f"{p['credits_per_sport']} кр. за лигу · {p['per_cycle']:.0f} кр. на цикл "
+            f"({p['usable']} доступно на {p['days_left']:.1f} дн.)")
+    if p.get("starved"):
+        line += " · КРЕДИТЫ НА ИСХОДЕ, ширина на минимуме"
+    return line
+
+
+def monthly_need(sports: int, poll_minutes: int, per_sport: int = None) -> int:
+    """What a given ambition would actually cost per month, for the menu."""
+    per_sport = per_sport or credits_per_sport()
+    cycles = QUOTA_PERIOD_DAYS * 24 * 60 / max(1, poll_minutes)
+    return int(math.ceil(sports * per_sport * cycles))

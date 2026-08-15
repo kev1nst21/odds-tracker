@@ -14,7 +14,10 @@ from config import (
     SNAPSHOT_RETENTION_HOURS,
     BASELINE_MAX_AGE_MINUTES,
     DIGEST_INTERVAL_HOURS,
+    QUOTA_WARN_CREDITS,
+    QUOTA_WARN_INTERVAL_HOURS,
 )
+import budget
 import odds_client
 import oddspapi_client
 import storage
@@ -147,10 +150,56 @@ def _maybe_digest(now, fetched_at):
         traceback.print_exc()
 
 
+def _days_left(remaining) -> float:
+    """How long the balance lasts at the burn rate we have actually measured."""
+    try:
+        burn = float(storage.get_meta("burn_per_day") or 0)
+        usable = max(0, int(remaining) - 800)
+        return usable / burn if burn > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _maybe_quota_alarm(now, fetched_at):
+    """Warn to Telegram before the credits run out, not after.
+
+    Throttled the same way the digest is, and swallowed the same way: a
+    warning that cannot be delivered must not be able to take down the poll it
+    is warning about.
+    """
+    remaining = (odds_client.LAST_QUOTA or {}).get("remaining")
+    if remaining is None or remaining > QUOTA_WARN_CREDITS:
+        return
+    last = storage.get_meta("last_quota_warn_at")
+    if last:
+        try:
+            if (now - datetime.fromisoformat(last)) < timedelta(hours=QUOTA_WARN_INTERVAL_HOURS):
+                return
+        except ValueError:
+            pass
+    try:
+        p = budget.LAST_PLAN or {}
+        notifier.notify_credits({
+            "remaining": int(remaining),
+            "days_left": _days_left(remaining),
+            "width": p.get("sports") if p.get("capped") else None,
+            "plan_hint": budget.describe(p),
+        }, dashboard_url=DASHBOARD_URL)
+        storage.set_meta("last_quota_warn_at", fetched_at)
+        print(f"[budget] отправлено предупреждение: осталось {remaining} кредитов")
+    except Exception:  # noqa: BLE001 -- a warning must never break the poll
+        print("[budget] предупреждение не ушло, продолжаем:")
+        traceback.print_exc()
+
+
 def run_once():
     storage.init_db()
     now = datetime.now(timezone.utc)
     fetched_at = now.isoformat()
+
+    # Notice a plan rollover before anything asks how many credits are left,
+    # so the governor divides by the right number of days remaining.
+    budget.observe(odds_client.LAST_QUOTA, now)
 
     all_sports = odds_client.list_sports()  # free call, no quota cost
     sport_keys = odds_client.select_sport_keys(all_sports)
@@ -244,9 +293,19 @@ def run_once():
           f"просело у всех {f.get('all_books_moved',0)}, вход не дотянул "
           f"{f.get('entry_too_low',0)} → сигналов {f.get('signals',0)}")
 
+    # What the governor allowed this cycle, recorded before rendering so the
+    # page can state the width it is actually running at rather than the width
+    # someone once typed into config.
+    if budget.LAST_PLAN:
+        storage.set_meta("budget_plan", json.dumps(budget.LAST_PLAN))
+        line = budget.describe()
+        if line:
+            print(f"[budget] {line}")
+
     path = dashboard.render_dashboard(summaries, quota=odds_client.LAST_QUOTA)
 
     _maybe_digest(now, fetched_at)
+    _maybe_quota_alarm(now, fetched_at)
 
     actionable = sum(1 for s in summaries if s.get("alertable"))
     starred = sum(1 for s in summaries if s.get("stars", 0) >= 3)
