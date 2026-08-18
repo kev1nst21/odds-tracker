@@ -1342,6 +1342,68 @@ def _budget_plan() -> dict:
         return {}
 
 
+def _grading_state() -> dict:
+    """When bets were last scored, and when they will be scored next.
+
+    Added 2026-08-16, the morning after the book was reset, because the very
+    first bet of the new record raised a question the site could not answer.
+    The Danish match kicked off at 12:00, and at 16:30 it still showed no
+    result. Nothing anywhere said why. From outside, "not graded yet" and
+    "grading is broken" look identical -- and this project has already lost
+    days to exactly that kind of ambiguity twice.
+
+    The answer turned out to be mundane: scores cost quota, so results.py runs
+    at most once every RESULTS_CHECK_INTERVAL_HOURS and only looks at matches
+    that started RESULT_CHECK_DELAY_HOURS ago. The bet was simply between two
+    windows. But working that out took reading the source and reconstructing a
+    schedule by hand, which is not a thing a reader should ever have to do
+    about their own statistics.
+
+    So the schedule is published. A reader who wonders where their result is
+    gets a time instead of a silence.
+    """
+    from config import RESULTS_CHECK_INTERVAL_HOURS, RESULT_CHECK_DELAY_HOURS
+    out = {"interval_hours": RESULTS_CHECK_INTERVAL_HOURS,
+           "delay_hours": RESULT_CHECK_DELAY_HOURS}
+    stamp = storage.get_meta("last_results_check_at")
+    if not stamp:
+        return out
+    try:
+        last = datetime.fromisoformat(str(stamp))
+    except (TypeError, ValueError):
+        return out
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    nxt = last + timedelta(hours=RESULTS_CHECK_INTERVAL_HOURS)
+    out["last_check_at"] = last.isoformat()
+    out["next_check_at"] = nxt.isoformat()
+    try:
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(hours=RESULT_CHECK_DELAY_HOURS)).isoformat()
+        out["awaiting"] = len(storage.get_unresolved_alerts(cutoff))
+    except Exception:  # noqa: BLE001 -- a diagnostic must never break the page
+        pass
+    return out
+
+
+def _grading_line() -> str:
+    """One sentence on the page answering 'where is my result'."""
+    g = _grading_state()
+    nxt = g.get("next_check_at")
+    if not nxt:
+        return ""
+    try:
+        when = datetime.fromisoformat(nxt).strftime("%H:%M")
+    except (TypeError, ValueError):
+        return ""
+    waiting = g.get("awaiting") or 0
+    who = (f"{waiting} {_plural(waiting, 'ставка ждёт', 'ставки ждут', 'ставок ждут')} расчёта"
+           if waiting else "ставок в очереди нет")
+    return (f"<p class='detect ok'>Результаты сверяем раз в "
+            f"{g['interval_hours']:g} ч и не раньше чем через {g['delay_hours']:g} ч "
+            f"после старта матча — {who}, следующая сверка в {when} UTC.</p>")
+
+
 def _write_ledger(agg: dict) -> None:
     """Dump every logged signal next to index.html as plain JSON.
 
@@ -1372,6 +1434,9 @@ def _write_ledger(agg: dict) -> None:
         # August; a constraint that now decides how much market we watch had
         # better be published rather than inferred from a CI log.
         "budget": _budget_plan(),
+        # When the record gets scored. Published so "где мой результат"
+        # has an answer that is a timestamp rather than a silence.
+        "grading": _grading_state(),
         "count": len(rows),
         "signals": rows,
     }
@@ -1951,6 +2016,7 @@ $ticker
   ещё ждут своего матча, лежат выше, в «Открытых». Считаем по цене, которую называли.
   У двух стратегий бывают <b>разные исходы на одном матче</b>: прямая ставка может не
   зайти, а фора по тому же событию — зайти. Поэтому в каждой строке стоят оба вердикта.</p>
+  $grading_line
   <div class="strats">
     $stats_aggressive
     $stats_optimal
@@ -2266,6 +2332,7 @@ def render_dashboard(summaries: list, quota: dict = None):
         ticker=_ticker(summaries),
         summaries_html=_summaries_html(summaries, storage.recent_signals(24)),
         top_books=_top_books(storage.top_books(10)),
+        grading_line=_grading_line(),
         stats_aggressive=_strategy_card(
             aggressive, "Агрессивная",
             "Все сигналы подряд, какой бы ни был коэффициент.", "agg",
