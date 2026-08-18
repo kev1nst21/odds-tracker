@@ -110,6 +110,55 @@ print("claim ok: методика описывает лестницу довер
                                (3, config.MOVED_FOR_3_STARS),
                                (4, config.MOVED_FOR_4_STARS))))
 
+# --- the share ceiling, and exactly how much it is allowed to take ----------
+# Added 2026-08-18, the same day the rule itself was fixed. Until that morning
+# breadth was scored twice -- by count and by share -- and the SMALLER of the
+# two won, so a low share could overrule any amount of independent
+# confirmation: twelve books out of seventy is 17%, which collapsed a four-star
+# move to one star and deleted it. The page never mentioned this, because the
+# page described the ladder purely in counts. Prose and code disagreed and
+# nothing complained, which is the exact failure this file exists to prevent.
+#
+# So the sentence is now on the page, and it is pinned here in two ways: the
+# words must be present, and the function must actually behave the way the
+# words promise. Either one drifting fails the suite.
+import analytics  # noqa: E402
+
+if config.SHARE_DOCKS_ONE_RUNG:
+    says("ровно на одну",
+         "страница обязана признать, что доля рынка может опустить ступень — "
+         "и обязана сказать, что ровно на одну, иначе читатель не сможет "
+         "пересчитать оценку сам")
+
+    # the promise, checked against the function rather than against itself
+    for moved, quoting in ((6, 50), (8, 50), (10, 60), (12, 70), (43, 54), (4, 70)):
+        books = {f"b{i}" for i in range(moved)}
+        got = analytics._stars(books, False, quoting)
+        by_count = (4 if moved >= config.MOVED_FOR_4_STARS
+                    else 3 if moved >= config.MOVED_FOR_3_STARS
+                    else 2 if moved >= config.MOVED_FOR_2_STARS
+                    else 1)
+        assert by_count - got <= 1, (
+            f"{moved} из {quoting}: по счёту {by_count}★, а выдано {got}★ — "
+            "страница обещает падение ровно на одну ступень, код отнял больше")
+        assert got <= by_count, (
+            f"{moved} из {quoting}: доля НАБАВИЛА ступень ({by_count}★ → {got}★) — "
+            "это не потолок, а подарок, и на странице такого не обещано")
+    print("claim ok: доля опускает ступень максимум на одну — проверено на "
+          "6/50, 8/50, 10/60, 12/70, 43/54, 4/70")
+
+    # and the reason must be stated, not just the mechanic: a docked rung is a
+    # statement about US being early, not about the signal being weak
+    says("мы рано",
+         "страница обязана объяснить, ПОЧЕМУ низкая доля снижает ступень — "
+         "иначе правило выглядит произвольным")
+    print("claim ok: страница объясняет смысл понижения — рынок среагировал не весь")
+else:
+    assert "ровно на одну" not in text, (
+        "SHARE_DOCKS_ONE_RUNG выключен, а страница всё ещё обещает понижение "
+        "ровно на одну ступень")
+    print("claim ok: понижение по доле отключено, и страница про него молчит")
+
 # --- and the flat-stake promise must be on the page, not just in the code ---
 # It is the reason the by-stars table can be trusted, so a reader has to be
 # able to see it stated.
