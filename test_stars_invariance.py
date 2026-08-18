@@ -109,28 +109,39 @@ print(f"инвариант ok: все ступени считаются один
 
 print("лестница доверия: все инварианты пройдены")
 
-# --- 8. the ceiling by share: width alone must not lift a rating ------------
-# The property that made the analyst's calibration necessary. A move is an
-# event on an OUTCOME, so tripling the number of books quoting it roughly
-# triples how many move -- and under a pure-count rule the same real move
-# climbs the ladder for free. Checked against the twenty ledger rows of
-# 2026-08-15 tripled at constant share, a pure-count ladder put five of six
-# into four stars.
+# --- 8. width alone must not lift a rating -----------------------------------
+# The property the share ceiling exists for, restated on 2026-08-18 when the
+# ceiling was softened from min() to a one-rung dock.
 #
-# Note what is and is NOT claimed. A move that carries a large share of the
-# market DOES gain rungs as more independent books confirm it -- 27 of 36 is
-# stronger evidence than 9 of 12, and pretending otherwise would throw away
-# real information. What must be impossible is a rating bought purely with
-# breadth of coverage while the market itself stays unconvinced.
-for share, cap in ((0.10, 1), (0.25, 2), (0.40, 3)):
-    for quoting in (10, 20, 40, 80, 200):
-        moved = int(quoting * share)
-        if moved < 1:
-            continue
-        got = stars(books(moved), False, quoting)
-        assert got <= cap, (share, quoting, moved, got, cap)
-print("инвариант ok: при доле ниже потолка рейтинг не растёт, сколько бы контор "
-      "мы ни подключили — ширину фида нельзя обменять на звёзды")
+# The ORIGINAL statement was "the same share at any feed width scores the
+# same". That is no longer true, and pretending otherwise would be dishonest:
+# under a one-rung dock, four books out of seventeen score two stars while
+# twelve out of fifty-one -- the identical share -- score three. That is a
+# deliberate choice. Twelve independent bookmakers confirming a move IS
+# stronger evidence than four, and a rule that refuses to see the difference
+# throws away the most reliable thing we measure.
+#
+# What must remain impossible is the thing that actually motivated the
+# ceiling: a FIXED handful of books buying a rating simply because we bought a
+# wider subscription. So the invariant is monotonicity in the denominator --
+# holding the number of movers fixed, a wider feed can only lower the rating,
+# never raise it.
+for moved in (2, 3, 4, 5, 6, 8, 12):
+    seen = [stars(books(moved), False, q) for q in (12, 17, 25, 40, 60, 90, 150)]
+    assert seen == sorted(seen, reverse=True), (moved, seen)
+print("инвариант ok: при том же числе двинувшихся контор более широкий фид "
+      "оценку не повышает — ширину подписки нельзя обменять на звёзды")
+
+# and the specific case that started it all: a handful on a wide market
+assert stars(books(4), False, 70) < config.MIN_SIGNAL_STARS, (
+    "4 конторы из 70 (6%) не должны публиковаться сами по себе")
+# With a sharp book among them it becomes the LOWEST published rung -- two
+# stars, "осторожно" -- and that is unchanged by the 2026-08-18 softening. It
+# is a deliberate call, not an oversight: Pinnacle moving is worth a rung, and
+# the reader is told plainly that this is the cautious tier.
+assert stars(books(4), True, 70) == config.MIN_SIGNAL_STARS, stars(books(4), True, 70)
+print("инвариант ok: 4 из 70 не сигнал; с острой конторой — минимальная "
+      "ступень «осторожно», не выше")
 
 # --- 9. a sharp book lifts, but never publishes on its own ------------------
 # Until 2026-08-15 `well_evidenced` had an "or sharp_down" escape hatch, so one
@@ -158,3 +169,44 @@ assert config.MIN_MOVED_BOOKS < config.MOVED_FOR_2_STARS, (
 gap = [n for n in range(config.MIN_MOVED_BOOKS, config.MOVED_FOR_2_STARS)]
 print(f"инвариант ok: движения у {gap} контор пишем в журнал, но не публикуем — "
       f"фильтр по качеству живой")
+
+# --- 11. the share ceiling may dock one rung, never two ---------------------
+# The most destructive line in the project, live from 2026-08-15 to 08-18.
+# min(by_count, by_share) meant a single low share overruled any amount of
+# independent confirmation: twelve bookmakers out of seventy moving the same
+# way scored 17% share and collapsed from four stars to ONE, which is below the
+# publishing floor -- so it never reached the page at all.
+#
+# Vladislav spotted the symptom without seeing the code: "если даже у 5-6
+# контор линия тронулась, то мы это событие должны рассматривать".
+#
+# The deeper error was treating share purely as conviction. It is also a
+# measure of HOW LATE WE ARE: a steam move begins with a few books and ends
+# with all of them, and by the time share is high the entry is usually gone
+# (that is literally the all_books_moved bucket). A hard share cap therefore
+# punished catching moves early, which is the one thing this product is for.
+for moved, quoting, floor in ((6, 50, 2), (8, 50, 2), (10, 60, 2), (12, 70, 3)):
+    got = stars(books(moved), False, quoting)
+    assert got >= floor, (
+        f"{moved} контор из {quoting} ({moved/quoting:.0%}) дали {got}★ — "
+        f"широкая независимая поддержка снова схлопывается долей")
+    assert got >= config.MIN_SIGNAL_STARS, (moved, quoting, got)
+print("инвариант ok: 6/50, 8/50, 10/60 и 12/70 публикуются, а не исчезают")
+
+# ...and the thing the ceiling exists for must still hold
+for moved, quoting in ((4, 70), (5, 50), (3, 20), (2, 60)):
+    got = stars(books(moved), False, quoting)
+    assert got < config.MIN_SIGNAL_STARS, (moved, quoting, got)
+print("инвариант ok: горстка контор на широком рынке по-прежнему не сигнал")
+
+# the dock is exactly one rung, never more
+for quoting in (20, 45, 70, 120):
+    for moved in range(1, quoting + 1):
+        share = moved / quoting
+        by_count = (4 if moved >= config.MOVED_FOR_4_STARS
+                    else 3 if moved >= config.MOVED_FOR_3_STARS
+                    else 2 if moved >= config.MOVED_FOR_2_STARS else 1)
+        got = stars(books(moved), False, quoting)
+        assert by_count - got <= 1, (moved, quoting, by_count, got)
+        assert got <= by_count, (moved, quoting, by_count, got)
+print("инвариант ok: доля снимает ровно одну ступень и никогда не добавляет")

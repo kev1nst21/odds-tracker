@@ -73,6 +73,7 @@ from config import (
     SHARE_CAP_2_STARS,
     SHARE_CAP_3_STARS,
     SHARE_CAP_4_STARS,
+    SHARE_DOCKS_ONE_RUNG,
     MAX_LEAD_HOURS,
     OUTLIER_MAX_DEVIATION_PCT,
 )
@@ -215,7 +216,32 @@ def _stars(down_books: set, sharp_moved: bool, books_count: int = 0) -> int:
                     else 3 if share >= SHARE_CAP_3_STARS
                     else 2 if share >= SHARE_CAP_2_STARS
                     else 1)
-        stars = min(by_count, by_share)
+        # THE SHARE MAY DOCK ONE RUNG, NEVER TWO. This was min() until
+        # 2026-08-18, and min() turned out to be the single most destructive
+        # line in the project.
+        #
+        # Vladislav put his finger on it without seeing the code: "если даже у
+        # 5-6 контор линия тронулась, то мы это событие должны рассматривать".
+        # We were not. On the widened feed a move confirmed by TWELVE
+        # independent bookmakers out of seventy scored 17% share, and min()
+        # collapsed it from four stars to one -- below the publishing floor, so
+        # it vanished without ever appearing on the page.
+        #
+        # The mistake was calibrating the caps against the old ledger, where a
+        # signal saw a median of 17 books. Share is not only a measure of how
+        # convinced the market is; it is also a measure of HOW LATE WE ARE. A
+        # steam move starts with a handful of books and ends with all of them,
+        # and by the time share is high the entry is usually gone -- that is
+        # precisely the "просело у всех, брать негде" bucket. Capping hard by
+        # share therefore punished catching a move EARLY, which is the one
+        # thing this product exists to do.
+        #
+        # One rung keeps what the cap was for -- four books out of seventy is
+        # still noise and still unpublished -- while letting genuine breadth
+        # speak. Twelve books now reads three stars instead of one.
+        stars = max(by_share, by_count - 1) if SHARE_DOCKS_ONE_RUNG \
+            else min(by_count, by_share)
+        stars = min(stars, by_count)
     else:
         stars = by_count
     if sharp_moved:

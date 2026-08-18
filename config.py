@@ -445,6 +445,13 @@ SHARE_CAP_2_STARS = float(os.getenv("SHARE_CAP_2_STARS", "0.20"))
 SHARE_CAP_3_STARS = float(os.getenv("SHARE_CAP_3_STARS", "0.33"))
 SHARE_CAP_4_STARS = float(os.getenv("SHARE_CAP_4_STARS", "0.50"))
 
+# How hard the share ceiling is allowed to bite. True (the default since
+# 2026-08-18) means it can dock at most ONE rung; False restores the original
+# min(count, share), which could drop a twelve-book move to a single star and
+# delete it from the page. Kept as a switch because this is the lever that
+# trades volume against strictness, and it must be revertible in one edit.
+SHARE_DOCKS_ONE_RUNG = os.getenv("SHARE_DOCKS_ONE_RUNG", "1") not in ("0", "false", "False")
+
 # What each rung is called, and how much trust the page and the bot should
 # express. Deliberately worded as evidence strength, never as advice.
 STAR_LABELS = {
