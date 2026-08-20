@@ -194,28 +194,37 @@ def _maybe_quota_alarm(now, fetched_at):
 
 
 def _sweep_polymarket(now):
-    """Look at Polymarket for every open signal that is due for a look.
+    """Look at Polymarket for every candidate that is due for a look.
 
-    "Due" is decided per signal by polymarket.due_in_minutes, which spaces
-    looks by time-to-kick-off and tightens once the market has been found.
-    That is the self-tuning Vladislav asked for: hammering a free API every
-    five minutes for a match a day and a half away, whose market is not listed
-    yet, is noise; checking every two hours twenty minutes before kick-off is
-    how you sleep through the edge.
+    "Candidate" is deliberately wider than "signal": published signals plus the
+    raw movements our own filters rejected. Those filters were written for
+    bookmakers -- three books minimum, a price band, an entry that still
+    captures half the move -- and none of that reasoning transfers to an order
+    book with a visible price and visible depth. Instruction, 20.08: bet "от
+    сигналов... а так же из движений, которые мы видим".
+
+    "Due" is decided per candidate by polymarket.due_in_minutes: far from
+    kick-off the market there usually does not exist yet, so hammering a free
+    API every five minutes is noise; in the last hours the line moves and every
+    skipped cycle is a possibly-missed edge.
+
+    Each look can now produce TWO rows -- the straight win and the double
+    chance -- because the bot can take both: "бот в таком случае будет делать
+    две ставки с разным кофом, если такое возможно".
 
     Returns (looks, takes) for the cycle log.
     """
     import polymarket
     from datetime import datetime as _dt
 
-    signals = storage.active_signals(limit=120)
-    if not signals:
+    cands = storage.pm_candidates()
+    if not cands:
         return 0, 0
 
     index = polymarket.build_index()
     looks = takes = 0
-    for row in signals:
-        start = row["start_time"]
+    for row in cands:
+        start = row.get("start_time")
         try:
             lead_h = (_dt.fromisoformat(str(start).replace("Z", "+00:00")) - now
                       ).total_seconds() / 3600.0
@@ -225,6 +234,11 @@ def _sweep_polymarket(now):
             continue
         last_at, was_matched = storage.pm_last_check(row["fixture_id"], row["outcome_name"])
         wait = polymarket.due_in_minutes(lead_h, was_matched)
+        # A movement we never published is checked less eagerly than a signal:
+        # same ladder, one notch slower, because the signal is the thing we
+        # actually believe in and the movement is the wider net.
+        if row.get("source") == "movement":
+            wait = max(wait, 15)
         if last_at:
             try:
                 age_min = (now - _dt.fromisoformat(last_at)).total_seconds() / 60.0
@@ -233,22 +247,22 @@ def _sweep_polymarket(now):
             if age_min < wait:
                 continue
 
-        res = polymarket.check(
-            row["home_team"], row["away_team"], str(start),
-            row["outcome_name"], row["entry_price"], events=index,
-        )
-        looks += 1
-        res.update({
-            "fixture_id": row["fixture_id"], "outcome_name": row["outcome_name"],
-            "sport_key": row["sport_key"], "start_time": start,
-            "lead_hours": round(lead_h, 2),
-        })
-        storage.save_pm_quote(res)
-        if res.get("take"):
-            takes += 1
-            print(f"[polymarket] ЗАЗОР: {row['outcome_name']} — БК "
-                  f"{row['entry_price']:.2f}, стакан {res.get('avg_coef')}, "
-                  f"+{res.get('edge_pct')}% на ${res.get('exec_stake_usd')}")
+        for res in polymarket.check(
+                row["home_team"], row["away_team"], str(start),
+                row["outcome_name"], row.get("entry_price"),
+                opt_price=row.get("opt_price"), events=index):
+            looks += 1
+            res.update({
+                "fixture_id": row["fixture_id"], "outcome_name": row["outcome_name"],
+                "sport_key": row.get("sport_key"), "start_time": start,
+                "lead_hours": round(lead_h, 2), "source": row.get("source", "signal"),
+            })
+            storage.save_pm_quote(res)
+            if res.get("take"):
+                takes += 1
+                print(f"[polymarket] ЗАЗОР ({res.get('leg')}): {row['outcome_name']} — "
+                      f"БК {res.get('entry_price')}, стакан {res.get('avg_coef')}, "
+                      f"+{res.get('edge_pct')}% на ${res.get('exec_stake_usd')}")
     return looks, takes
 
 

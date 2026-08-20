@@ -161,4 +161,50 @@ print("claim ok: чем ближе старт, тем чаще; найденны
       f"ненайденного ({[pm.due_in_minutes(h, True) for h in (48,24,6,1)]} против "
       f"{[pm.due_in_minutes(h, False) for h in (48,24,6,1)]}), в последние часы — каждый цикл")
 
+# --- 12. две ноги одной сделки ---------------------------------------------
+# «бот в таком случае будет делать две ставки с разным кофом, если такое
+# возможно». Агрессивная — прямая победа. Оптимальная — двойной шанс, который
+# на Polymarket отдельной строкой не продаётся, но существует: «наш или ничья»
+# это ровно «соперник НЕ победит», то есть токен No на рынке соперника.
+EV2 = {"title": "Fenerbahce vs. Lyon", "slug": "fen-lyon",
+       "startDate": "2026-08-21T19:00:00Z", "markets": [
+    {"question": "Will Lyon win?", "outcomes": '["Yes","No"]',
+     "clobTokenIds": '["y-lyon","n-lyon"]', "outcomePrices": '["0.30","0.70"]'},
+    {"question": "Will Fenerbahce win?", "outcomes": '["Yes","No"]',
+     "clobTokenIds": '["y-fen","n-fen"]', "outcomePrices": '["0.45","0.55"]'},
+    {"question": "Fenerbahce vs. Lyon - Total Corners",
+     "outcomes": '["Over 9.5","Under 9.5"]', "clobTokenIds": '["o","u"]'},
+]}
+legs = pm.find_legs(EV2, "Lyon", "Fenerbahce", "Lyon")
+assert legs["aggressive"]["token_id"] == "y-lyon", legs
+assert legs["optimal"]["token_id"] == "n-fen", legs
+assert "или ничья" in legs["optimal"]["means"], legs
+print("claim ok: агрессивная — Yes на Lyon, оптимальная — No на Fenerbahce "
+      f"(«{legs['optimal']['means']}»), угловые не тронуты")
+
+# угловые НЕ должны попасть ни в одну ногу — на них мы не ставим никогда
+assert all(l["token_id"] not in ("o", "u") for l in legs.values()), legs
+
+# --- 13. полное событие раскрывается, а не только первый рынок --------------
+# «на полики раскрывай полное событие». Раньше смотрели только на победу и не
+# знали, что теряем: у одного теннисного события Polymarket пятнадцать рынков.
+kinds = {m["kind"] for m in pm.explode(EV2)}
+assert pm.KIND_MONEYLINE in kinds and pm.KIND_TOTAL in kinds, kinds
+assert len(pm.explode(EV2)) == 3, pm.explode(EV2)
+print(f"claim ok: событие раскрывается целиком — {len(pm.explode(EV2))} рынка, "
+      f"типы {sorted(kinds)}")
+
+# --- 14. без цены у конторы оптимальная нога НЕ выдумывается ----------------
+# Правило «лучше на 5%» требует базы. Нет базы — нет сделки, и строка честно
+# говорит почему, вместо того чтобы подставить приблизительную цену. Ровно на
+# этом теннис годами не давал безопасной ставки, и врать здесь нельзя.
+rows = pm.check("Fenerbahce", "Lyon", "2026-08-21T19:00:00Z", "Lyon",
+                entry_price=3.62, opt_price=None, events=[EV2])
+by_leg = {r["leg"]: r for r in rows}
+assert set(by_leg) == {"aggressive", "optimal"}, by_leg
+assert by_leg["optimal"]["take"] is False, by_leg["optimal"]
+assert "нет цены у конторы" in by_leg["optimal"]["reason"], by_leg["optimal"]
+print("claim ok: без цены двойного шанса у конторы оптимальная нога не "
+      "выдумывается — пишется причина")
+
 print("polymarket: все инварианты пройдены")

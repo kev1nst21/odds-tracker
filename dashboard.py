@@ -1574,6 +1574,10 @@ def _write_pm_feed() -> None:
             "polymarket_event": r["event_title"],
             "polymarket_slug": r["event_slug"],
             "pick": r["outcome_name"],
+            "leg": r["leg"],
+            "leg_means": r["means"] or ("прямая победа" if r["leg"] == "aggressive"
+                                        else "двойной шанс"),
+            "source": r["source"],
             "token_id": r["token_id"],
             "side": "BUY",
             "starts_at": r["start_time"],
@@ -1586,6 +1590,7 @@ def _write_pm_feed() -> None:
             "edge_pct": r["edge_pct"],
             "max_stake_usd": r["exec_stake_usd"],
             "full_size_available": bool(r["fits_target"]),
+            "polymarket_question": r["question"],
             "signal_stars": r["base_stars"],
             "pm_stars": _pm_stars_of(r),
             "checked_at": r["checked_at"],
@@ -1599,6 +1604,12 @@ def _write_pm_feed() -> None:
             "target_stake_usd": POLYMARKET_TARGET_STAKE,
             "note": ("buy only at or below max_price; max_stake_usd is what the "
                      "book held at that limit at checked_at, not a promise"),
+            "legs": ("aggressive = the straight win, same bet as at the "
+                     "bookmaker; optimal = the double chance, bought here as "
+                     "No on the opponent. Both may appear for one event and "
+                     "may be taken together -- they are different prices on "
+                     "the same view, not a hedge"),
+            "dedupe_on": ["fixture_id", "pick", "leg"],
         },
         "count": len(out),
         "signals": out,

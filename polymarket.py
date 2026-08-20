@@ -461,40 +461,69 @@ def plan_entry(asks: list[tuple[float, float]],
 # --------------------------------------------------------------------------
 
 def check(home: str, away: str, start_iso: str, pick_name: str,
-          entry_price: float, events: list[dict] = None) -> dict:
-    """Блок для журнала. Никогда не бросает исключение."""
+          entry_price: float, opt_price: float = None,
+          events: list[dict] = None) -> list[dict]:
+    """Одна проверка одного события — но по ОБЕИМ ногам.
+
+    Возвращает список: по строке на каждую найденную ногу (агрессивную и
+    оптимальную), либо одну строку с matched=False и причиной. Никогда не
+    бросает исключение: сбой Polymarket не имеет права уронить опрос.
+
+    Оптимальная нога считается только если у нас ЕСТЬ с чем сравнивать —
+    цена двойного шанса у конторы. Без базы правило «лучше на 5%» бессмысленно,
+    и выдумывать базу мы не будем: строка просто не появится.
+    """
     stamp = datetime.now(timezone.utc).isoformat()
-    base = {"checked_at": stamp, "matched": False}
+    base = {"checked_at": stamp, "matched": False, "leg": "aggressive"}
     if not POLYMARKET_ENABLED:
-        return {**base, "reason": "выключено"}
+        return [{**base, "reason": "выключено"}]
     try:
         idx = build_index() if events is None else events
         if not idx:
-            return {**base, "reason": "индекс пуст"}
+            return [{**base, "reason": "индекс пуст"}]
         ev = match_event(idx, home, away, start_iso)
         if not ev:
-            return {**base, "reason": "события нет на Polymarket",
-                    "index_size": len(idx)}
-        tok = pick_token(ev, pick_name, home, away)
-        if not tok:
-            return {**base, "reason": "нет токена под наш исход",
-                    "event_title": ev.get("title"), "event_slug": ev.get("slug")}
-        book = fetch_book(tok["token_id"])
-        asks = asks_from(book or {})
-        if not asks:
-            return {**base, "reason": "пустой стакан",
-                    "event_title": ev.get("title"), "token_id": tok["token_id"]}
-        plan = plan_entry(asks, entry_price)
-        return {
-            **base, "matched": True,
-            "event_title": ev.get("title"), "event_slug": ev.get("slug"),
-            "token_id": tok["token_id"], "outcome": tok["outcome"],
-            "shape": tok["shape"], "question": tok.get("question"),
-            **plan,
-        }
+            return [{**base, "reason": "события нет на Polymarket",
+                     "index_size": len(idx)}]
+        meta = {"event_title": ev.get("title"), "event_slug": ev.get("slug"),
+                "markets_total": len(ev.get("markets") or [])}
+        legs = find_legs(ev, pick_name, home, away)
+        if not legs:
+            return [{**base, "reason": "нет подходящего рынка", **meta}]
+
+        bench = {"aggressive": entry_price, "optimal": opt_price}
+        out = []
+        for name, leg in legs.items():
+            price = bench.get(name)
+            if not price:
+                # Нет цены у конторы -- сравнивать не с чем. Пишем строкой, а не
+                # молчим: отсутствие базы это факт о нашей стороне, и он тоже
+                # данные (именно так теннис годами не давал безопасной цены).
+                out.append({**base, "leg": name, "matched": True, **meta,
+                            "token_id": leg["token_id"], "outcome": leg["outcome"],
+                            "question": leg.get("question"),
+                            "reason": "нет цены у конторы для сравнения",
+                            "take": False, "exec_stake_usd": 0.0})
+                continue
+            book = fetch_book(leg["token_id"])
+            asks = asks_from(book or {})
+            if not asks:
+                out.append({**base, "leg": name, "matched": True, **meta,
+                            "token_id": leg["token_id"], "reason": "пустой стакан",
+                            "take": False, "exec_stake_usd": 0.0})
+                continue
+            plan = plan_entry(asks, price)
+            out.append({
+                **base, "leg": name, "matched": True, **meta,
+                "token_id": leg["token_id"], "outcome": leg["outcome"],
+                "shape": leg["shape"], "question": leg.get("question"),
+                "means": leg.get("means"),
+                **plan,
+            })
+        return out
     except Exception as e:                                   # noqa: BLE001
         LAST_DIAG["exception"] = repr(e)
-        return {**base, "reason": "ошибка", "detail": repr(e)}
+        return [{**base, "reason": "ошибка", "detail": repr(e)}]
 
 
 # --------------------------------------------------------------------------
@@ -530,3 +559,134 @@ def pm_stars(edge_pct: Optional[float], exec_stake: float, base_stars: int = 0,
             and (base_stars or 0) >= PM_STARS_4_MIN_BASE):
         stars = 4
     return stars
+
+
+# --------------------------------------------------------------------------
+# Всё событие целиком, а не одна победа
+# --------------------------------------------------------------------------
+
+# Что за рынок перед нами. Классификация грубая намеренно: нам не нужно понять
+# каждый экзотический рынок Polymarket, нам нужно не перепутать победу в матче
+# с числом угловых.
+KIND_MONEYLINE = "moneyline"
+KIND_DOUBLE_CHANCE = "double_chance"
+KIND_TOTAL = "total"
+KIND_SPREAD = "spread"
+KIND_OTHER = "other"
+
+
+def classify_market(question: str, outcomes: list) -> str:
+    q = (question or "").lower()
+    names = [str(o).strip().lower() for o in (outcomes or [])]
+    if any(n.startswith(("over", "under")) for n in names) or " o/u " in q or "total" in q:
+        return KIND_TOTAL
+    if "spread" in q or "handicap" in q or any("+" in n or "−" in n for n in names):
+        return KIND_SPREAD
+    if any(w in q for w in ("corner", "exact score", "first team", "both teams",
+                            "goalscorer", "card", "assist", "completed match")):
+        return KIND_OTHER
+    if len(names) in (2, 3) and not set(names) & {"yes", "no"}:
+        return KIND_MONEYLINE
+    if set(names) == {"yes", "no"}:
+        return KIND_MONEYLINE
+    return KIND_OTHER
+
+
+def explode(event: dict) -> list[dict]:
+    """Каждый рынок события с токенами и витринными ценами.
+
+    Просьба 20.08: «на полики раскрывай полное событие и ищи такой же вариант
+    как поставить в оптимальной стратегии». Одно теннисное событие Polymarket
+    несёт полтора десятка рынков — победа, тотал сетов, тотал геймов, фора, и
+    так далее. Раньше мы смотрели только на первый и не знали, что теряем.
+
+    Цены здесь ВИТРИННЫЕ и годятся только на то, чтобы решить, за каким
+    стаканом идти. Ставить по ним нельзя: замер 20.08 показал витрину 0.415
+    против лучшего аска 0.42 на том же рынке.
+    """
+    out = []
+    for m in event.get("markets") or []:
+        outcomes = _loads(m.get("outcomes")) or []
+        tokens = _loads(m.get("clobTokenIds")) or []
+        prices = _loads(m.get("outcomePrices")) or []
+        if not (isinstance(outcomes, list) and isinstance(tokens, list)):
+            continue
+        if len(outcomes) != len(tokens) or not outcomes:
+            continue
+        q = m.get("question") or ""
+        kind = classify_market(q, outcomes)
+        legs = []
+        for i, (oc, tid) in enumerate(zip(outcomes, tokens)):
+            try:
+                shop = float(prices[i]) if i < len(prices) else None
+            except (TypeError, ValueError):
+                shop = None
+            legs.append({"outcome": str(oc), "token_id": str(tid),
+                         "showcase_price": shop,
+                         "showcase_coef": round(1.0 / shop, 4) if shop else None})
+        out.append({"question": q, "kind": kind, "closed": bool(m.get("closed")),
+                    "outcomes": legs})
+    return out
+
+
+def find_legs(event: dict, pick_name: str, home: str, away: str,
+              opponent: str = None) -> dict:
+    """Две ноги одной сделки: агрессивная и оптимальная.
+
+    АГРЕССИВНАЯ — прямая победа нашего выбора. Это то же, что мы ставим у
+    конторы по entry_price, и сравнивается с ней напрямую.
+
+    ОПТИМАЛЬНАЯ — аналог нашего «безопасного варианта». У конторы это двойной
+    шанс: «наш или ничья». На Polymarket его не продают отдельной строкой, но
+    он там есть: «наш ИЛИ ничья» — это ровно «соперник НЕ победит», то есть
+    токен No на рынке победы соперника. Ставка та же, вход другой.
+
+    Возвращаются обе, если обе нашлись; бот сам решит, брать одну или две —
+    «бот в таком случае будет делать две ставки с разным кофом, если такое
+    возможно».
+    """
+    opp = opponent or (away if team_in(home, pick_name) else home)
+    legs: dict[str, dict] = {}
+    for m in event.get("markets") or []:
+        outcomes = _loads(m.get("outcomes")) or []
+        tokens = _loads(m.get("clobTokenIds")) or []
+        if not (isinstance(outcomes, list) and isinstance(tokens, list)):
+            continue
+        if len(outcomes) != len(tokens) or not outcomes:
+            continue
+        q = m.get("question") or ""
+        if classify_market(q, outcomes) is KIND_OTHER or _is_prop_question(q):
+            continue
+        names = [str(o) for o in outcomes]
+        low = [n.strip().lower() for n in names]
+
+        # Агрессивная: именованный исход = наш выбор.
+        if "aggressive" not in legs:
+            for n, tid in zip(names, tokens):
+                if n.strip().lower() in ("yes", "no"):
+                    continue
+                if team_in(pick_name, n):
+                    legs["aggressive"] = {"token_id": str(tid), "outcome": n,
+                                          "question": q, "shape": "named"}
+                    break
+        # Агрессивная в форме вопроса: "Will <наш> win?" -> Yes.
+        if "aggressive" not in legs and set(low) == {"yes", "no"}:
+            if team_in(pick_name, q) and not team_in(opp, q):
+                for n, tid in zip(names, tokens):
+                    if n.strip().lower() == "yes":
+                        legs["aggressive"] = {"token_id": str(tid), "outcome": "Yes",
+                                              "question": q, "shape": "yes_no"}
+                        break
+        # Оптимальная: "Will <соперник> win?" -> No. Это и есть двойной шанс.
+        if "optimal" not in legs and set(low) == {"yes", "no"}:
+            if team_in(opp, q) and not team_in(pick_name, q):
+                for n, tid in zip(names, tokens):
+                    if n.strip().lower() == "no":
+                        legs["optimal"] = {
+                            "token_id": str(tid), "outcome": "No",
+                            "question": q, "shape": "yes_no_inverted",
+                            "means": f"{pick_name} или ничья",
+                        }
+                        break
+    LAST_DIAG["legs"] = list(legs)
+    return legs

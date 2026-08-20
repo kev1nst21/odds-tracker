@@ -231,6 +231,23 @@ def _conn():
 # running with the old shape and every INSERT naming a new column would fail.
 # Additive only -- nothing here can destroy a row.
 _MIGRATIONS = {
+    "pm_quotes": {
+        # Which of the two bets on the same event this row is about. Added
+        # 20.08.2026: "бот в таком случае будет делать две ставки с разным
+        # кофом, если такое возможно". One event can now produce an aggressive
+        # leg (straight win) and an optimal leg (the double chance, bought on
+        # Polymarket as "No" on the opponent), each with its own book, its own
+        # limit and its own size.
+        "leg": "TEXT NOT NULL DEFAULT 'aggressive'",
+        # Where the candidate came from: a published signal, or a raw movement
+        # that our own filters rejected. The second pool is several times the
+        # first, and on Polymarket a rejected move can still be a good trade --
+        # our filters were tuned for bookmaker limits, not for an order book.
+        "source": "TEXT NOT NULL DEFAULT 'signal'",
+        "question": "TEXT",
+        "means": "TEXT",
+        "markets_total": "INTEGER",
+    },
     "movements": {
         # "had_entry" used to mean "a bookmaker was still offering the old
         # price", and the site printed it as "был вход" -- which readers
@@ -1469,8 +1486,9 @@ def save_pm_quote(row: dict) -> None:
                     (checked_at, fixture_id, outcome_name, sport_key, start_time,
                      lead_hours, matched, reason, event_title, event_slug, token_id,
                      entry_price, need_coef, best_coef, avg_coef, exec_stake_usd,
-                     fits_target, edge_pct, take)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     fits_target, edge_pct, take, leg, source, question, means,
+                     markets_total)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (row.get("checked_at"), row.get("fixture_id"), row.get("outcome_name"),
                  row.get("sport_key"), row.get("start_time"), row.get("lead_hours"),
@@ -1479,20 +1497,73 @@ def save_pm_quote(row: dict) -> None:
                  row.get("entry_price"), row.get("need_coef"), row.get("best_coef"),
                  row.get("avg_coef"), row.get("exec_stake_usd"),
                  1 if row.get("fits_target") else 0, row.get("edge_pct"),
-                 1 if row.get("take") else 0),
+                 1 if row.get("take") else 0, row.get("leg") or "aggressive",
+                 row.get("source") or "signal", row.get("question"),
+                 row.get("means"), row.get("markets_total")),
             )
             conn.commit()
     except sqlite3.Error:
         pass
 
 
+def pm_candidates(limit: int = 250):
+    """Everything worth asking Polymarket about, not just what we published.
+
+    Widened 20.08.2026 on instruction: bet "от сигналов... а так же из
+    движений, которые мы видим и из той аналитики, которую мы можем сделать
+    исходя из этих движений".
+
+    The reasoning is sound and worth stating. Our filters -- three books
+    minimum, a price band, an entry that still captures half the move -- were
+    tuned for BOOKMAKERS, where a bad entry means a limited or voided bet. On
+    an order book none of that applies: there is a visible price and a visible
+    depth, and a move we refused to publish can still be sitting in front of a
+    Polymarket line that has not woken up. Refusing to even LOOK at it because
+    of a rule written for a different venue would be leaving money on the table
+    for a reason that no longer holds.
+
+    Signals come first and keep their optimal-leg price; movements follow with
+    whatever price was still takeable when we saw them.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with _conn() as conn:
+        rows = [dict(r) | {"source": "signal"} for r in conn.execute(
+            """SELECT fixture_id, sport_key, home_team, away_team, outcome_name,
+                      stars, entry_price, opt_price, start_time
+               FROM tracked_alerts
+               WHERE kind='prematch' AND resolved=0
+                 AND start_time IS NOT NULL AND start_time > ?
+               ORDER BY start_time ASC LIMIT ?""",
+            (now, limit)).fetchall()]
+        seen = {(r["fixture_id"], r["outcome_name"]) for r in rows}
+        for r in conn.execute(
+            """SELECT fixture_id, sport_key, home_team, away_team, outcome_name,
+                      stars, entry_price, best_left_price, start_time
+               FROM movements
+               WHERE resolved=0 AND start_time IS NOT NULL AND start_time > ?
+               ORDER BY start_time ASC LIMIT ?""",
+                (now, limit)):
+            key = (r["fixture_id"], r["outcome_name"])
+            if key in seen:
+                continue
+            seen.add(key)
+            d = dict(r) | {"source": "movement", "opt_price": None}
+            # A rejected movement has no logged entry, but it does have the best
+            # price still standing when we looked -- which is exactly the number
+            # the rule needs.
+            d["entry_price"] = d.get("entry_price") or d.get("best_left_price")
+            if d["entry_price"]:
+                rows.append(d)
+    return rows
+
+
 def pm_last_check(fixture_id: str, outcome_name: str):
     """When we last looked, and whether we had found the market by then."""
     with _conn() as conn:
         r = conn.execute(
-            """SELECT checked_at, matched FROM pm_quotes
+            """SELECT checked_at, MAX(matched) AS matched FROM pm_quotes
                WHERE fixture_id=? AND outcome_name=?
-               ORDER BY checked_at DESC LIMIT 1""",
+               GROUP BY checked_at ORDER BY checked_at DESC LIMIT 1""",
             (fixture_id, outcome_name),
         ).fetchone()
     return (r["checked_at"], bool(r["matched"])) if r else (None, False)
