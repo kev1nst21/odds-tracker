@@ -28,6 +28,7 @@ from config import (
     MAX_SIGNAL_PRICE,
     MIN_SIGNAL_PRICE,
     EXCLUDE_DRAW,
+    SIGNAL_MARKETS,
 )
 import storage
 
@@ -90,9 +91,28 @@ def detect(records, fetched_at):
     max_age = _baseline_max_age()
     floor_iso = _window_start_iso(fetched_at, max_age)
     diag = {"lines": 0, "no_history": 0, "compared": 0, "flat": 0,
-            "moved": 0, "spiked": 0, "max_age": max_age, "by_sport_blind": {}}
+            "moved": 0, "spiked": 0, "max_age": max_age, "by_sport_blind": {},
+            # Per-market line counts, kept for every market we BUY rather than
+            # every market we act on. This is the number that answers whether
+            # paying for spreads and totals bought anything outside US sports
+            # -- the provider says they are "mainly" US-only, and a count is
+            # worth more than an adjective.
+            "by_market": {}, "by_market_signal": {}}
+
+    signal_markets = {m.strip() for m in (SIGNAL_MARKETS or "").split(",") if m.strip()}
 
     for r in records:
+        # Count what we bought before deciding what we act on, so the ledger
+        # can show coverage for markets that are not yet allowed to publish.
+        mk = r.get("market_id") or "?"
+        diag["by_market"][mk] = diag["by_market"].get(mk, 0) + 1
+        # THE GATE. We buy spreads and totals; only h2h may become a signal
+        # until the counts above show the extra markets are really there.
+        # Placed before every other filter so a market we do not act on cannot
+        # touch the diagnostics that describe the markets we do.
+        if signal_markets and mk not in signal_markets:
+            continue
+        diag["by_market_signal"][mk] = diag["by_market_signal"].get(mk, 0) + 1
         # Exchanges and long-shot prices are excluded from signal generation
         # entirely -- not just at display time. A spike recorded here also
         # feeds the win-rate and CLV stats, so exchange noise would quietly

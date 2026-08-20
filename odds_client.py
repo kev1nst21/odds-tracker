@@ -378,9 +378,12 @@ def flatten_odds(raw_events: list) -> list:
     outcome_id is normalized to 'home'/'away'/'draw' when the outcome name
     matches a team name (h2h market), so downstream code (detector, results,
     notifier) doesn't need to special-case sports or bookmaker naming.
-    player_key has no real meaning for this provider (no player-prop markets
-    requested) but is kept as a constant '-' for schema compatibility with
-    the rest of the pipeline (detector/storage key on 5 fields).
+    player_key carries the LINE -- the handicap or total that the outcome is
+    quoted at -- or '-' for markets that have none. It was a constant '-'
+    until 20.08.2026, when spreads and totals were bought for the first time
+    and it became the field that keeps "Over 2.5" and "Over 3.5" apart. See
+    the long note at the assignment; getting this wrong fabricates movements
+    rather than losing them, which is the worse of the two failures.
     """
     return _flatten(raw_events)
 
@@ -415,7 +418,31 @@ def _flatten(raw_events: list) -> list:
                         continue
                     side = _side_for_outcome(name, home_team, away_team)
                     outcome_id = side or (name or "").strip().lower() or "-"
+                    # THE LINE IS PART OF THE IDENTITY, NOT AN ATTRIBUTE.
+                    #
+                    # h2h has no line and keeps the historic "-". spreads and
+                    # totals do, and forgetting it would have been the single
+                    # worst bug this change could ship: "Over 2.5" and
+                    # "Over 3.5" both reduce to outcome_id "over", so the same
+                    # book quoting both, or moving from one to the other,
+                    # would look like one line whose price jumped. The
+                    # detector diffs a price against its own past value -- it
+                    # would have faithfully reported a fabricated 40% move and
+                    # we would have published it.
+                    #
+                    # player_key is the free slot: it is carried through every
+                    # storage key and every baseline lookup already, and this
+                    # provider has no player props, so it has been the literal
+                    # string "-" since day one. Putting the handicap or total
+                    # here makes each line its own series for free, with no
+                    # schema change. A book moving 2.5 -> 3.5 then reads as
+                    # what it is: the old series going quiet and a new one
+                    # starting, rather than a phantom price move.
+                    point = outcome.get("point")
+                    player_key = "-" if point is None else f"{point:g}"
                     label = f"{home_team} vs {away_team}: {name}"
+                    if point is not None:
+                        label += f" {point:+g}" if market_id == "spreads" else f" {point:g}"
                     records.append({
                         "fixture_id": fixture_id,
                         "sport_key": sport_key,
@@ -426,7 +453,7 @@ def _flatten(raw_events: list) -> list:
                         "bookmaker": bookmaker,
                         "market_id": market_id,
                         "outcome_id": outcome_id,
-                        "player_key": "-",
+                        "player_key": player_key,
                         "price": float(price),
                         "label": label,
                     })

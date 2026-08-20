@@ -129,11 +129,26 @@ print("инвариант ok: горизонт считается до 1-го ч
       "и февраль), и в последний час месяца не схлопывается в ноль")
 
 # --- 8b. a balance is spent before it expires, not hoarded -----------------
+# RESTATED 20.08.2026, and the restatement matters more than the fix.
+#
+# This used to assert that the SPORT COUNT may not fall as the reset nears.
+# That was a fair proxy for "spend it, don't hoard it" while a league cost the
+# same everywhere -- and it stopped being one the day MARKETS grew to three,
+# because the region ladder is priced in markets too. Given more room the
+# governor can now buy a SECOND REGION instead of more leagues: the same money
+# goes to more bookmakers per match rather than more matches. Sport count then
+# falls while spend rises, and the old assertion called that hoarding.
+#
+# It is not hoarding, it is a different purchase, so the invariant is stated
+# on the thing it always meant: credits actually committed per cycle. Written
+# as spend, it survives the next change to markets or regions too.
 mid = plan(60_000, poll=20)
 end = budget.plan(60_000, now=datetime(2026, 8, 29, tzinfo=timezone.utc), poll_minutes=20)
-assert end["sports"] >= mid["sports"], (end["sports"], mid["sports"])
-print(f"инвариант ok: ближе к сбросу тот же остаток тратится шире "
-      f"({mid['sports']} → {end['sports']}), а не сгорает")
+spend = lambda p: p["sports"] * budget.credits_per_sport(p["regions"])
+assert spend(end) >= spend(mid), (spend(end), spend(mid), end, mid)
+print(f"инвариант ok: ближе к сбросу тот же остаток тратится шире — "
+      f"{spend(mid)} → {spend(end)} кредитов за цикл "
+      f"({mid['sports']} лиг × {mid['regions']} → {end['sports']} × {end['regions']}), а не сгорает")
 
 # --- 9. no data yet must fall back DOWN, not up ----------------------------
 # See invariant 13 for the live bug that rewrote this one. An unknown balance
@@ -196,14 +211,37 @@ print(f"инвариант ok: лестница регионов растёт с
 # the small plan we are on today must be left exactly as it is
 p = plan(1_137)
 assert p["regions"] == "eu", p["regions"]
-assert p["credits_per_sport"] == 1, p
+# Stated as the region count, not as a credit price. The price of a league is
+# regions x markets, so pinning it to 1 was silently also pinning MARKETS to
+# one entry -- and this invariant is about not faking a region upgrade on a
+# small balance, which has nothing to do with how many markets we buy.
+assert p["region_count"] == 1, p
+assert p["credits_per_sport"] == budget.credits_per_sport("eu"), p
 print("инвариант ok: на текущем балансе регион остаётся один — апгрейд не имитируется")
 
 # and on the 5M plan at a 5-minute cadence the full scenario must be affordable
+# REWRITTEN 20.08.2026. It used to demand the full ambition -- fine while
+# ambition was 60 and a league cost 4 credits. With ambition at 250 and three
+# markets a league costs 12, and 250 x 12 x 8640 cycles is 26M against a 5M
+# plan. Demanding the ambition would now be demanding an overspend, which is
+# the exact failure this whole module exists to prevent.
+#
+# So the invariant says what actually matters and always did: whatever width
+# the governor hands back must be payable for the rest of the period, all four
+# regions must be reachable on this plan, and the width must be a real choice
+# between ambition and affordability rather than a number pulled from the air.
 p = plan(5_000_000, poll=5)
-month = p["sports"] * p["credits_per_sport"] * (30 * 24 * 60 / 5)
-assert p["sports"] == config.MAX_SPORTS_PER_CYCLE and len(p["regions"].split(",")) == 4, p
-assert month < 5_000_000, month
+# Spend is checked over the period the governor is actually sizing for -- the
+# days left until the 1st -- not over a notional 30. Multiplying a width that
+# was sized for eleven days by thirty days' worth of cycles overstates it by
+# the ratio of the two, which is arithmetic, not an overspend.
+period = p["sports"] * p["credits_per_sport"] * p["cycles_left"]
+assert len(p["regions"].split(",")) == 4, p
+assert p["sports"] == min(config.MAX_SPORTS_PER_CYCLE, p["affordable"]), p
+assert period <= p["usable"], (period, p["usable"], p)
+month = period
+assert p["sports"] > 60, ("план 5M обязан давать больше, чем прежний потолок в "
+                          "60 лиг, иначе покупка ширины не окупается", p)
 print(f"инвариант ok: план 5M при опросе раз в 5 мин даёт {p['sports']} лиг × "
       f"{p['regions']} = {month:,.0f} кр./мес, укладывается".replace(",", " "))
 

@@ -194,11 +194,43 @@ MATCH_MAX_DURATION_HOURS = float(os.getenv("MATCH_MAX_DURATION_HOURS", "4"))
 # OddsPapi route.
 REGIONS = os.getenv("THEODDSAPI_REGIONS", "eu")
 
-# h2h = moneyline/1X2. Extra markets (spreads, totals) each multiply the
-# per-call quota cost by the number of regions -- keep to h2h only to stay
-# inside the $30/mo "20K credits" plan at a reasonable polling frequency.
-# See README.md for the quota math.
-MARKETS = os.getenv("THEODDSAPI_MARKETS", "h2h")
+# h2h = moneyline/1X2, spreads = handicap, totals = over/under. Each market
+# multiplies the per-call cost by the number of regions, so this line is the
+# single biggest lever on spend: 3 markets x 4 regions = 12 credits per league
+# per cycle instead of 4.
+#
+# 20.08.2026 -- widened from "h2h" on Vladislav's instruction to use the plan
+# we are paying for. The arithmetic that made h2h-only correct belonged to the
+# $30 plan and stopped being true the day the 5M plan was bought: at 60 leagues
+# we were burning 53k credits a day against 5,000,000 that expire on the 1st,
+# i.e. 83% of the plan was going to be thrown away unused. Spending it on
+# breadth is strictly better than letting it lapse.
+#
+# HONEST CAVEAT, and it is a real one. The provider's own documentation says
+# spreads and totals are "mainly available for US sports and bookmakers at
+# this time". So the coverage we actually get outside US sports is an open
+# question, NOT a promise -- which is why detector.py now counts lines per
+# market and publishes the count. One day of real data answers it; arguing
+# from the docs does not.
+#
+# What this does NOT buy: a set handicap for tennis. That lives in the
+# additional-markets endpoint (one event per call, different cost model), not
+# here. `spreads` for tennis is a GAME handicap. Said plainly because the
+# opposite was briefly claimed out loud, and a wrong reason for a right change
+# is still wrong.
+MARKETS = os.getenv("THEODDSAPI_MARKETS", "h2h,spreads,totals")
+
+# Which of those markets may CREATE a signal. Deliberately narrower than
+# MARKETS: we buy the extra lines and store their history from day one, but
+# only h2h feeds publication until there is evidence the others behave.
+#
+# The reason is not caution for its own sake. analytics builds a bet from a
+# side ("home"/"away") -- it looks up the opposing price to price a double
+# chance, and calls the outcome by a team name. Hand it an "Over" and the
+# machinery still runs and still produces a row, just a meaningless one. A
+# gate here is one line; unwinding a week of nonsense rows from the book is
+# not. Widen this only after the per-market counts show real coverage.
+SIGNAL_MARKETS = os.getenv("SIGNAL_MARKETS", "h2h")
 
 # Soccer leagues to track, matched by exact sport key from GET /v4/sports.
 # NOTE: The Odds API's esports coverage is confirmed live (2026-07-29, full
@@ -263,7 +295,15 @@ WIDE_GROUPS = [g.strip() for g in
 # breadth and measurability improving together for once. On today's balance
 # the governor will still hand back six; on a bigger plan it hands back sixty
 # the same hour, with no commit.
-MAX_SPORTS_PER_CYCLE = int(os.getenv("MAX_SPORTS_PER_CYCLE", "60"))
+#
+# 20.08.2026 -- raised 60 -> 250. Sixty stopped being an ambition and became
+# the binding constraint: the governor was handing back "you can afford 363"
+# while this line answered "I only want 60". Money is no longer what limits
+# breadth; the number of leagues actually in season is. Setting this above
+# that number costs nothing -- budget.py clamps to the balance and the sports
+# list clamps to what exists -- and it means a busy Saturday is covered by the
+# same config that covers a quiet Tuesday.
+MAX_SPORTS_PER_CYCLE = int(os.getenv("MAX_SPORTS_PER_CYCLE", "250"))
 
 # The wide list is bigger than one cycle's budget, so it is walked in slices:
 # each cycle takes the next MAX_SPORTS_PER_CYCLE - len(core) keys and the

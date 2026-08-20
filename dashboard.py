@@ -277,7 +277,38 @@ def _detect_line() -> str:
                 "будет мало не потому, что рынок спокоен.")
     return (f"<p class='detect {tone}'>В последнем срезе сверено "
             f"<b>{lines - blind}</b> из <b>{lines}</b> линий "
-            f"(сравнение с ценой не старше {d.get('max_age', '?')} мин){tail}</p>")
+            f"(сравнение с ценой не старше {d.get('max_age', '?')} мин){tail}</p>"
+            + _markets_line(d))
+
+
+def _markets_line(d: dict) -> str:
+    """How many lines each bought market actually returned.
+
+    Added 20.08.2026 with the purchase of spreads and totals. The provider's
+    documentation says those two are "mainly available for US sports and
+    bookmakers", which is an adjective, not a number -- and we are now paying
+    three times as much per league on the strength of it. This line turns the
+    adjective into a count, on the page, next to everything else that can be
+    recounted.
+
+    It also marks which markets may currently produce a signal, because
+    buying a market and acting on one are deliberately different things here
+    and a reader has no other way to tell.
+    """
+    by = d.get("by_market") or {}
+    if len(by) <= 1:
+        return ""
+    acting = set((d.get("by_market_signal") or {}).keys())
+    names = {"h2h": "исход", "spreads": "фора", "totals": "тотал",
+             "outrights": "аутрайт"}
+    parts = []
+    for mk, n in sorted(by.items(), key=lambda kv: -kv[1]):
+        label = names.get(mk, mk)
+        mark = "" if mk in acting else " <i>(только собираем)</i>"
+        parts.append(f"<b>{_num(n)}</b> {label}{mark}")
+    return ("<p class='detect'>Из них по рынкам: " + ", ".join(parts)
+            + ". Рынки без пометки дают сигналы; помеченные мы пока только "
+              "копим, чтобы посмотреть на них данными, а не на слово.</p>")
 
 
 def _funnel_block(f: dict, span: str) -> str:
