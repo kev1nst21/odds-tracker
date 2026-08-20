@@ -276,11 +276,40 @@ if bd["graded"]:
     assert "ГДЕ РЕЗУЛЬТАТ РАЗЛИЧАЕТСЯ" in block and "ставок" in block, block[:300]
     print(f"разбивки ok: {bd['graded']} сыгравших, разрезаны по спорту/падению/звёздам")
 
+# The counterfactual tab was repointed from bookmakers to Polymarket on
+# 20.08.2026 ("очень важную аналитику теперь только по полику"). The bookmaker
+# scorer is kept and still checked -- it is the history of how we got here --
+# but the block that renders on the page is now the Polymarket one, and it has
+# to survive an EMPTY journal, because that is the state it ships in.
 cf = storage.counterfactual_stats()
-cfb = dashboard._counterfactual_block(cf)
-if cf["pool"]:
-    assert "вернули две звезды" in cfb, cfb[:300]
-    print(f"контрфактические ok: {cf['pool']} движений, {len(cf['rules'])} правил считаются параллельно")
+assert cf["rules"] and "вернули две звезды" in {r["label"] for r in cf["rules"]} \
+    or any("две звезды" in r["label"] for r in cf["rules"]), cf["rules"]
+
+pmcf = storage.pm_counterfactual()
+pmb = dashboard._pm_counterfactual_block(pmcf)
+assert "POLYMARKET" in pmb, pmb[:300]
+if not pmcf["pool"]:
+    # An empty tab must SAY it is empty and why, not render a table of zeroes
+    # that reads like a measurement.
+    assert "начал вестись сегодня" in pmb, pmb[:400]
+assert len(pmcf["rules"]) >= 8, pmcf["rules"]
+labels = " ".join(r["label"] for r in pmcf["rules"])
+for must in ("зазор от 3%", "зазор от 8%", "полный размер", "последние 3 часа"):
+    assert must in labels, (must, labels)
+print(f"контрфактические ok: {len(pmcf['rules'])} правил по Polymarket, "
+      f"{pmcf['pool']} сыгравших сигналов в журнале котировок")
+
+# --- the bot feed is a contract, so its shape is pinned ----------------------
+# A trading bot reads this file. A silently renamed field is a bot placing
+# orders on stale or missing data, so the keys are asserted, not assumed.
+import json as _jsonf  # noqa: E402
+feed = _jsonf.load(open(dashboard.PM_FEED_PATH, encoding="utf-8"))
+assert feed["version"] == 1, feed
+assert set(feed) >= {"version", "generated_at", "rule", "count", "signals"}, feed
+assert feed["rule"]["min_edge_pct"] == config.POLYMARKET_MIN_EDGE_PCT, feed["rule"]
+assert isinstance(feed["signals"], list) and feed["count"] == len(feed["signals"])
+print(f"фид для бота ok: версия {feed['version']}, правило "
+      f"+{feed['rule']['min_edge_pct']:g}%, сигналов сейчас {feed['count']}")
 
 p3 = dashboard.render_dashboard([], quota={"remaining": 9999, "used": 5})
 page3 = open(p3, encoding="utf-8").read()

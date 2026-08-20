@@ -29,6 +29,8 @@ from string import Template
 import analytics
 import storage
 from config import (
+    POLYMARKET_MIN_EDGE_PCT,
+    POLYMARKET_TARGET_STAKE,
     MOVED_FOR_2_STARS,
     MOVED_FOR_3_STARS,
     MOVED_FOR_4_STARS,
@@ -1007,7 +1009,69 @@ def _breakdown_block(bd: dict) -> str:
     )
 
 
-def _counterfactual_block(cf: dict) -> str:
+def _pm_counterfactual_block(cf: dict) -> str:
+    """The Polymarket rules we did not adopt, scored on the quote journal.
+
+    Repointed 20.08.2026 from bookmakers to Polymarket, on instruction: "эта
+    вся вкладка у нас по сути может работать... очень важную аналитику теперь
+    только по полику, по бк уже её можешь не вести".
+
+    It gains a power the bookmaker version never had. There, a rejected rule
+    could only be replayed against movements we happened to log once. Here
+    every open signal is re-quoted dozens of times between firing and kick-off,
+    so the journal holds the whole price path -- which means "what if the
+    threshold were 3%", "what if we always waited for the last hour", and "what
+    if we only took full size" are answerable from data that already exists,
+    not from an experiment somebody has to run with money.
+
+    The two head rows are the ones that matter most and cost nothing to
+    compare: taking the first quote that clears the rule, against waiting for
+    the best one before kick-off. The gap between them is the price of
+    patience, in dollars, measured rather than argued.
+    """
+    if not cf or not cf.get("pool"):
+        return (
+            "<div class='breakdown reveal'>"
+            "<h3>ЧТО БЫ ДАЛИ ДРУГИЕ ПРАВИЛА НА POLYMARKET</h3>"
+            "<p class='bd-cap'>Пока пусто, и это честное состояние, а не ошибка: "
+            "журнал котировок Polymarket начал вестись сегодня, а строка "
+            "появляется здесь только после того, как матч сыгран и результат "
+            "известен. Каждый открытый сигнал опрашивается на Polymarket "
+            "заново каждые несколько минут до самого старта, так что данные "
+            "копятся сами. Первые строки — после первых расчётов.</p></div>")
+    rows = []
+    for r in cf["rules"]:
+        money = f"{r['profit']:+,.0f}$".replace(",", " ")
+        cls = "pos" if r["profit"] > 0 else ("neg" if r["profit"] < 0 else "")
+        wr = f"{r['win_rate']:.0f}%" if r["win_rate"] is not None else "—"
+        roi = f"{r['roi']:+.0f}%" if r["roi"] is not None else "—"
+        staked = f"{r['staked']:,.0f}$".replace(",", " ") if r["staked"] else "—"
+        rows.append(
+            f"<tr><td>{html.escape(r['label'])}</td><td class='num'>{r['n']}</td>"
+            f"<td class='num'>{wr}</td><td class='num'>{staked}</td>"
+            f"<td class='num {cls}'>{money}</td><td class='num {cls}'>{roi}</td></tr>"
+        )
+    return (
+        "<div class='breakdown reveal'>"
+        "<h3>ЧТО БЫ ДАЛИ ДРУГИЕ ПРАВИЛА НА POLYMARKET</h3>"
+        f"<p class='bd-cap'>Считается по журналу котировок Polymarket: "
+        f"{cf['looks']} снятий стакана по {cf['pool']} сыгравшим сигналам. "
+        f"Деньги — по ФАКТИЧЕСКОМУ размеру, который держал стакан, и по "
+        f"фактическому среднему коэффициенту, а не по флэту: на Polymarket "
+        f"размер решает стакан, и сделка на $30 не равна сделке на "
+        f"${cf['target']:.0f}. Текущее правило — зазор от {cf['min_edge']:g}% "
+        f"к лучшей цене в конторе. Первые две строки отвечают на самый дорогой "
+        f"вопрос: сколько стоит подождать лучшую цену вместо того, чтобы брать "
+        f"первую подходящую.</p>"
+        "<div class='bd-scroll'>"
+        "<table class='bd'><thead><tr><th>правило</th><th class='num'>сделок</th>"
+        "<th class='num'>заход.</th><th class='num'>оборот</th>"
+        "<th class='num'>итог</th><th class='num'>доходность</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div></div>"
+    )
+
+
+def _counterfactual_block_bookmakers(cf: dict) -> str:
     """The rules we did not adopt, scored on the same live data.
 
     The honest counterweight to any filter change. When we tightened to three
@@ -1474,6 +1538,82 @@ def _write_ledger(agg: dict) -> None:
     os.makedirs(os.path.dirname(LEDGER_PATH), exist_ok=True)
     with open(LEDGER_PATH, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=1)
+    _write_pm_feed()
+
+
+PM_FEED_PATH = os.path.join(os.path.dirname(DASHBOARD_PATH), "pm_signals.json")
+
+
+def _write_pm_feed() -> None:
+    """A separate, small, stable file for machines. Not for humans.
+
+    ledger.json is the record: everything that ever happened, growing forever.
+    A trading bot needs the opposite -- a short list of what is actionable in
+    the next few minutes, in a shape that will not change under it. Mixing the
+    two would mean either a bot parsing a hundred historical rows to find two
+    live ones, or a record shaped by the convenience of a consumer.
+
+    The contract is deliberately narrow and deliberately boring:
+      version      bumped only on a BREAKING change to this shape
+      rule         what "actionable" currently means, in machine-readable form
+      signals[]    zero or more rows, each with the token to buy, the price
+                   floor below which the trade is off, and the size the book
+                   actually held at that floor when we looked
+      checked_at   per row: how fresh the look is. Stale is not tradeable.
+
+    max_stake_usd is the executable size, not a wish. If the book held $37 at
+    or above the floor, this says 37 -- that was the explicit instruction:
+    "если к примеру не залезаем, то писать ту сумму по которой залезли".
+    """
+    rows = storage.pm_live_feed()
+    out = []
+    for r in rows:
+        out.append({
+            "fixture_id": r["fixture_id"],
+            "event": f"{r['home_team']} vs {r['away_team']}",
+            "polymarket_event": r["event_title"],
+            "polymarket_slug": r["event_slug"],
+            "pick": r["outcome_name"],
+            "token_id": r["token_id"],
+            "side": "BUY",
+            "starts_at": r["start_time"],
+            "lead_hours": r["lead_hours"],
+            "bookmaker_price": r["entry_price"],
+            "bookmaker_book": r["entry_book"],
+            "min_coef": r["need_coef"],
+            "max_price": round(1.0 / r["need_coef"], 4) if r["need_coef"] else None,
+            "seen_coef": r["avg_coef"],
+            "edge_pct": r["edge_pct"],
+            "max_stake_usd": r["exec_stake_usd"],
+            "full_size_available": bool(r["fits_target"]),
+            "signal_stars": r["base_stars"],
+            "pm_stars": _pm_stars_of(r),
+            "checked_at": r["checked_at"],
+        })
+    payload = {
+        "version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "rule": {
+            "compare_against": "best bookmaker entry price for the same pick",
+            "min_edge_pct": POLYMARKET_MIN_EDGE_PCT,
+            "target_stake_usd": POLYMARKET_TARGET_STAKE,
+            "note": ("buy only at or below max_price; max_stake_usd is what the "
+                     "book held at that limit at checked_at, not a promise"),
+        },
+        "count": len(out),
+        "signals": out,
+    }
+    with open(PM_FEED_PATH, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=1)
+
+
+def _pm_stars_of(r) -> int:
+    try:
+        import polymarket
+        return polymarket.pm_stars(r["edge_pct"], r["exec_stake_usd"] or 0,
+                                   r["base_stars"] or 0)
+    except Exception:                                          # noqa: BLE001
+        return 0
 
 
 # --------------------------------------------------------------------------
@@ -2380,7 +2520,7 @@ def render_dashboard(summaries: list, quota: dict = None):
             f"До {OPTIMAL_MAX_PRICE:g} — та же ставка. Выше — вход мягче: двойной шанс в футболе, фора там, где ничьей нет.", "opt",
             storage.recent_bets(5, "prematch", "optimal")),
         breakdown_block=_breakdown_block(storage.breakdown_stats("prematch")),
-        counterfactual_block=_counterfactual_block(storage.counterfactual_stats()),
+        counterfactual_block=_pm_counterfactual_block(storage.pm_counterfactual()),
         movements_table=_movements_table(storage.recent_movements(30)),
         movement_stats=_movement_stats(storage.movement_stats()),
         active_signals=_active_signals(active),

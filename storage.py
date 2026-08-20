@@ -28,6 +28,8 @@ from config import (
     ENTRY_MIN_GAP_PCT,
     ENTRY_MIN_CAPTURE_PCT,
     ENTRY_MAX_OVER_OLD_PCT,
+    POLYMARKET_TARGET_STAKE,
+    POLYMARKET_MIN_EDGE_PCT,
 )
 
 SCHEMA = """
@@ -139,6 +141,47 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_movements_dedup
     ON movements (fixture_id, outcome_id);
 CREATE INDEX IF NOT EXISTS idx_movements_open
     ON movements (resolved, start_time);
+
+-- Polymarket. One row per LOOK, not one per signal.
+--
+-- Added 20.08.2026, when Polymarket became the instrument rather than a
+-- curiosity. A signal is checked against Polymarket over and over from the
+-- moment it fires until kick-off, because the market there often does not
+-- exist yet when we detect the move (measured: their whole open football
+-- listing spans three days, our signals fire up to 44 hours out) and because
+-- the line moves after it appears. Vladislav's instruction was to wait for our
+-- price rather than ask once: "мы будем за ней следить и ставить когда нам
+-- будет подходить".
+--
+-- So this table is a time series, and that is the point: it answers not only
+-- "was there an edge" but "when did it appear and how long did it live" --
+-- the open question from the 09.08 plan that nothing has been able to answer
+-- because nothing was recorded.
+CREATE TABLE IF NOT EXISTS pm_quotes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    checked_at TEXT NOT NULL,
+    fixture_id TEXT NOT NULL,
+    outcome_name TEXT NOT NULL,
+    sport_key TEXT,
+    start_time TEXT,
+    lead_hours REAL,           -- how far from kick-off this look was
+    matched INTEGER NOT NULL,  -- did we find the event at all
+    reason TEXT,               -- why not, when not
+    event_title TEXT,
+    event_slug TEXT,
+    token_id TEXT,
+    entry_price REAL,          -- OUR bookmaker price: the base of the rule
+    need_coef REAL,            -- entry_price * 1.05
+    best_coef REAL,            -- top of their book
+    avg_coef REAL,             -- what we would actually average on our size
+    exec_stake_usd REAL,       -- how much fits at or above need_coef
+    fits_target INTEGER,       -- did the full target fit
+    edge_pct REAL,             -- (avg_coef / entry_price - 1) * 100
+    take INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_pm_fixture
+    ON pm_quotes (fixture_id, outcome_name, checked_at);
+CREATE INDEX IF NOT EXISTS idx_pm_take ON pm_quotes (take, checked_at);
 
 -- One row per poll: how many events the market moved, and where each one
 -- stopped being a signal. Without this the header can only say "22 движения"
@@ -1410,3 +1453,259 @@ def recent_snapshots(limit=200):
             (limit,),
         ).fetchall()
         return rows
+
+
+# ---------------------------------------------------------------------------
+# Polymarket
+# ---------------------------------------------------------------------------
+
+def save_pm_quote(row: dict) -> None:
+    """One look at Polymarket for one signal. Never raises."""
+    try:
+        with _conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO pm_quotes
+                    (checked_at, fixture_id, outcome_name, sport_key, start_time,
+                     lead_hours, matched, reason, event_title, event_slug, token_id,
+                     entry_price, need_coef, best_coef, avg_coef, exec_stake_usd,
+                     fits_target, edge_pct, take)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (row.get("checked_at"), row.get("fixture_id"), row.get("outcome_name"),
+                 row.get("sport_key"), row.get("start_time"), row.get("lead_hours"),
+                 1 if row.get("matched") else 0, row.get("reason"),
+                 row.get("event_title"), row.get("event_slug"), row.get("token_id"),
+                 row.get("entry_price"), row.get("need_coef"), row.get("best_coef"),
+                 row.get("avg_coef"), row.get("exec_stake_usd"),
+                 1 if row.get("fits_target") else 0, row.get("edge_pct"),
+                 1 if row.get("take") else 0),
+            )
+            conn.commit()
+    except sqlite3.Error:
+        pass
+
+
+def pm_last_check(fixture_id: str, outcome_name: str):
+    """When we last looked, and whether we had found the market by then."""
+    with _conn() as conn:
+        r = conn.execute(
+            """SELECT checked_at, matched FROM pm_quotes
+               WHERE fixture_id=? AND outcome_name=?
+               ORDER BY checked_at DESC LIMIT 1""",
+            (fixture_id, outcome_name),
+        ).fetchone()
+    return (r["checked_at"], bool(r["matched"])) if r else (None, False)
+
+
+def pm_best(fixture_id: str, outcome_name: str):
+    """The best look we have ever had at this signal -- the moment to have bet."""
+    with _conn() as conn:
+        return conn.execute(
+            """SELECT * FROM pm_quotes
+               WHERE fixture_id=? AND outcome_name=? AND take=1
+               ORDER BY edge_pct DESC LIMIT 1""",
+            (fixture_id, outcome_name),
+        ).fetchone()
+
+
+def pm_opportunities(limit: int = 60):
+    """Signals where Polymarket has, at any point, beaten the bookmaker."""
+    with _conn() as conn:
+        return conn.execute(
+            """
+            SELECT fixture_id, outcome_name, sport_key, start_time,
+                   MAX(edge_pct) AS best_edge,
+                   MAX(exec_stake_usd) AS best_stake,
+                   MIN(lead_hours) AS closest_look,
+                   COUNT(*) AS looks,
+                   MAX(event_title) AS event_title,
+                   MAX(event_slug) AS event_slug,
+                   MAX(entry_price) AS entry_price,
+                   MAX(avg_coef) AS avg_coef
+            FROM pm_quotes WHERE take=1
+            GROUP BY fixture_id, outcome_name
+            ORDER BY start_time DESC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+
+def pm_stats(hours: int = 24 * 30) -> dict:
+    """Coverage and edge, counted rather than assumed.
+
+    The two numbers that decide whether this whole direction works: what share
+    of our signals exist on Polymarket at all, and on what share of those the
+    price there ever beat the bookmaker by the required margin.
+    """
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    with _conn() as conn:
+        sig = conn.execute(
+            """SELECT fixture_id, outcome_name,
+                      MAX(matched) AS ever_matched,
+                      MAX(take) AS ever_take,
+                      MAX(edge_pct) AS best_edge,
+                      MAX(exec_stake_usd) AS best_stake,
+                      COUNT(*) AS looks
+               FROM pm_quotes WHERE checked_at >= ?
+               GROUP BY fixture_id, outcome_name""",
+            (since,),
+        ).fetchall()
+    n = len(sig)
+    matched = sum(1 for r in sig if r["ever_matched"])
+    took = sum(1 for r in sig if r["ever_take"])
+    edges = [r["best_edge"] for r in sig if r["ever_take"] and r["best_edge"] is not None]
+    stakes = [r["best_stake"] for r in sig if r["ever_take"] and r["best_stake"]]
+    return {
+        "signals": n,
+        "matched": matched,
+        "match_pct": round(matched / n * 100, 1) if n else 0.0,
+        "opportunities": took,
+        "take_pct": round(took / matched * 100, 1) if matched else 0.0,
+        "looks": sum(r["looks"] for r in sig),
+        "avg_edge_pct": round(sum(edges) / len(edges), 2) if edges else None,
+        "max_edge_pct": round(max(edges), 2) if edges else None,
+        "avg_stake_usd": round(sum(stakes) / len(stakes), 2) if stakes else None,
+        "full_size": sum(1 for r in sig if r["ever_take"]
+                         and (r["best_stake"] or 0) >= POLYMARKET_TARGET_STAKE - 0.01),
+    }
+
+
+def pm_counterfactual():
+    """«Что бы дали другие правила» — но на Polymarket, а не на конторах.
+
+    Развёрнуто сюда 20.08 по прямой просьбе: «эта вся вкладка у нас по сути
+    может работать... очень важную аналитику теперь только по полику, по бк уже
+    её можешь не вести».
+
+    Считается по журналу КОТИРОВОК, а не по ставкам. Каждый открытый сигнал
+    опрашивается на Polymarket десятки раз от срабатывания до стартового
+    свистка, и каждый взгляд лежит строкой. Поэтому здесь можно спросить то,
+    чего нельзя спросить про конторы: а если бы порог был 3%? а если бы мы
+    ждали последнего часа? а если бы брали только полный размер?
+
+    Важно: деньги считаются по ФАКТИЧЕСКОМУ размеру и ФАКТИЧЕСКОМУ среднему
+    коэффициенту, а не по флэту. На Polymarket размер определяется стаканом, и
+    флэт здесь врал бы: сделка на $30 и сделка на $200 — не одна ставка.
+
+    «Первый подходящий» против «лучшего за всё время» — не academic: первый
+    отвечает на «что бы мы взяли, если бы жали сразу», второй на «сколько
+    стоило подождать». Разница между строками и есть цена терпения.
+    """
+    with _conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT q.*, a.result AS result, a.stars AS base_stars
+            FROM pm_quotes q
+            JOIN tracked_alerts a
+              ON a.fixture_id = q.fixture_id
+             AND a.outcome_name = q.outcome_name
+             AND a.kind = 'prematch'
+            WHERE q.take = 1 AND a.resolved = 1 AND a.result IN ('hit','miss')
+            ORDER BY q.checked_at ASC
+            """
+        ).fetchall()
+
+    by_sig: dict[tuple, list] = {}
+    for r in rows:
+        by_sig.setdefault((r["fixture_id"], r["outcome_name"]), []).append(r)
+
+    def score(label, keep, choose="first"):
+        n = hits = 0
+        staked = profit = 0.0
+        for looks in by_sig.values():
+            ok = [r for r in looks if keep(r)]
+            if not ok:
+                continue
+            r = ok[0] if choose == "first" else max(ok, key=lambda x: x["edge_pct"] or 0)
+            size = r["exec_stake_usd"] or 0.0
+            coef = r["avg_coef"] or 0.0
+            if size <= 0 or coef <= 1.0:
+                continue
+            n += 1
+            staked += size
+            if r["result"] == "hit":
+                hits += 1
+                profit += size * (coef - 1.0)
+            else:
+                profit -= size
+        return {
+            "label": label, "n": n, "hits": hits, "profit": profit,
+            "staked": staked,
+            "win_rate": (hits / n * 100) if n else None,
+            "roi": (profit / staked * 100) if staked else None,
+        }
+
+    full = POLYMARKET_TARGET_STAKE - 0.01
+    rules = [
+        (f"Как сейчас: зазор от {POLYMARKET_MIN_EDGE_PCT:g}%, берём сразу",
+         lambda r: True, "first"),
+        (f"То же, но ждём лучшую цену до старта",
+         lambda r: True, "best"),
+        ("Порог мягче: зазор от 3%",
+         lambda r: (r["edge_pct"] or 0) >= 3, "first"),
+        ("Порог жёстче: зазор от 8%",
+         lambda r: (r["edge_pct"] or 0) >= 8, "first"),
+        ("Только зазор от 12%",
+         lambda r: (r["edge_pct"] or 0) >= 12, "first"),
+        ("Только когда влезает полный размер",
+         lambda r: (r["exec_stake_usd"] or 0) >= full, "first"),
+        ("Только в последние 3 часа до старта",
+         lambda r: (r["lead_hours"] or 99) <= 3, "first"),
+        ("Только заранее, дальше 12 часов",
+         lambda r: (r["lead_hours"] or 0) > 12, "first"),
+        ("Только теннис",
+         lambda r: (r["sport_key"] or "").startswith("tennis"), "first"),
+        ("Только футбол",
+         lambda r: (r["sport_key"] or "").startswith("soccer"), "first"),
+        ("Только под наш сигнал в 3★ и выше",
+         lambda r: (r["base_stars"] or 0) >= 3, "first"),
+    ]
+    return {
+        "rules": [score(l, k, c) for l, k, c in rules],
+        "pool": len(by_sig),
+        "looks": len(rows),
+        "min_edge": POLYMARKET_MIN_EDGE_PCT,
+        "target": POLYMARKET_TARGET_STAKE,
+    }
+
+
+def pm_live_feed(max_age_minutes: int = 30):
+    """The machine-readable answer to "what should a bot do right now".
+
+    Written 20.08.2026 because Vladislav has a Polymarket bot that is already
+    registered, verified and trading, and wants it acting on our signals rather
+    than on nothing. The clean way to join two systems is a contract, not a
+    merge: we publish what we believe, his bot decides what to do about it.
+
+    One row per signal that, at its most recent look, cleared the rule. Stale
+    looks are excluded on purpose -- an order book quote from an hour ago is
+    not an offer, and a feed that serves one invites a bot to take a price
+    that is gone. If the latest look did not clear, the signal is simply
+    absent: silence means "not now", never "no data".
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(minutes=max_age_minutes)).isoformat()
+    with _conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT q.*, a.stars AS base_stars, a.entry_book AS entry_book,
+                   a.home_team AS home_team, a.away_team AS away_team
+            FROM pm_quotes q
+            JOIN tracked_alerts a
+              ON a.fixture_id = q.fixture_id
+             AND a.outcome_name = q.outcome_name
+             AND a.kind = 'prematch'
+            WHERE q.checked_at >= ?
+              AND q.id IN (
+                  SELECT MAX(id) FROM pm_quotes
+                  GROUP BY fixture_id, outcome_name
+              )
+              AND q.take = 1
+              AND a.resolved = 0
+              AND q.start_time > ?
+            ORDER BY q.edge_pct DESC
+            """,
+            (cutoff, now.isoformat()),
+        ).fetchall()
+    return [dict(r) for r in rows]

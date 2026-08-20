@@ -6,6 +6,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 
 from config import (
+    POLYMARKET_ENABLED,
     DASHBOARD_URL,
     SPIKE_THRESHOLD_PCT,
     ODDSPAPI_KEY,
@@ -192,6 +193,65 @@ def _maybe_quota_alarm(now, fetched_at):
         traceback.print_exc()
 
 
+def _sweep_polymarket(now):
+    """Look at Polymarket for every open signal that is due for a look.
+
+    "Due" is decided per signal by polymarket.due_in_minutes, which spaces
+    looks by time-to-kick-off and tightens once the market has been found.
+    That is the self-tuning Vladislav asked for: hammering a free API every
+    five minutes for a match a day and a half away, whose market is not listed
+    yet, is noise; checking every two hours twenty minutes before kick-off is
+    how you sleep through the edge.
+
+    Returns (looks, takes) for the cycle log.
+    """
+    import polymarket
+    from datetime import datetime as _dt
+
+    signals = storage.active_signals(limit=120)
+    if not signals:
+        return 0, 0
+
+    index = polymarket.build_index()
+    looks = takes = 0
+    for row in signals:
+        start = row["start_time"]
+        try:
+            lead_h = (_dt.fromisoformat(str(start).replace("Z", "+00:00")) - now
+                      ).total_seconds() / 3600.0
+        except (TypeError, ValueError):
+            continue
+        if lead_h < 0:
+            continue
+        last_at, was_matched = storage.pm_last_check(row["fixture_id"], row["outcome_name"])
+        wait = polymarket.due_in_minutes(lead_h, was_matched)
+        if last_at:
+            try:
+                age_min = (now - _dt.fromisoformat(last_at)).total_seconds() / 60.0
+            except (TypeError, ValueError):
+                age_min = 1e9
+            if age_min < wait:
+                continue
+
+        res = polymarket.check(
+            row["home_team"], row["away_team"], str(start),
+            row["outcome_name"], row["entry_price"], events=index,
+        )
+        looks += 1
+        res.update({
+            "fixture_id": row["fixture_id"], "outcome_name": row["outcome_name"],
+            "sport_key": row["sport_key"], "start_time": start,
+            "lead_hours": round(lead_h, 2),
+        })
+        storage.save_pm_quote(res)
+        if res.get("take"):
+            takes += 1
+            print(f"[polymarket] ЗАЗОР: {row['outcome_name']} — БК "
+                  f"{row['entry_price']:.2f}, стакан {res.get('avg_coef')}, "
+                  f"+{res.get('edge_pct')}% на ${res.get('exec_stake_usd')}")
+    return looks, takes
+
+
 def run_once():
     storage.init_db()
     now = datetime.now(timezone.utc)
@@ -249,6 +309,26 @@ def run_once():
         moves_logged += 1 if s["move_is_new"] else 0
 
     notifier.notify_summaries(summaries, dashboard_url=DASHBOARD_URL)
+
+    # Polymarket. NOT a one-shot enrichment of the signals we just found -- a
+    # sweep over every signal still standing, however long ago it fired.
+    #
+    # Measured 20.08: their entire open football listing spans three days,
+    # while our signals fire up to 44 hours before kick-off. So at the moment
+    # a signal is born the market there frequently does not exist yet, and
+    # asking once would answer "no" for the majority of them forever. The
+    # instruction was to keep looking instead: "мы будем за ней следить и
+    # ставить когда нам будет подходить".
+    #
+    # Cost is time, not credits -- both Polymarket endpoints are free and do
+    # not touch the odds quota this whole file is built to ration.
+    pm_looks = pm_takes = 0
+    if POLYMARKET_ENABLED:
+        try:
+            pm_looks, pm_takes = _sweep_polymarket(now)
+        except Exception as e:                                # noqa: BLE001
+            # Never let the side quest kill the poll it rides on.
+            print(f"[polymarket] пропуск цикла: {e!r}")
 
     # Costs quota (one scores call per sport with pending alerts), so this is
     # internally throttled to run at most once every RESULTS_CHECK_INTERVAL_HOURS.
@@ -332,3 +412,4 @@ def run_once():
 
 if __name__ == "__main__":
     run_once()
+
