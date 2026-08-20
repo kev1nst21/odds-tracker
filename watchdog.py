@@ -54,6 +54,29 @@ STUCK_AFTER_MIN = int(os.getenv("STUCK_AFTER_MIN", "40"))
 # openly unreliable and we measured it skipping slots long ago.
 STALE_AFTER_MIN = int(os.getenv("STALE_AFTER_MIN", "100"))
 
+# ЦЕПОЧКА ОБОРВАЛАСЬ, А ОПРОС ИДЁТ. Самая коварная поломка из возможных, и до
+# 20.08 её не ловило ничто.
+#
+# poll.yml запускается двумя способами сразу: расписанием "7,37 * * * *", то
+# есть дважды в час, и самозапуском в последнем шаге через WORKFLOW_PAT,
+# который и даёт пятиминутный цикл. Если PAT протухнет или потеряет права,
+# самозапуск молча перестанет работать -- а расписание останется. Опрос не
+# встанет, он ПРОРЕДИТСЯ с пяти минут до тридцати.
+#
+# Проверка на "давно не было удачного прогона" такого не увидит: тридцать
+# минут это далеко не сто. Сайт будет живой, цифры свежие, всё зелёное -- и
+# только цена входа тихо станет хуже, потому что движение мы будем замечать в
+# среднем на четверть часа позже. Поэтому меряем ФАКТИЧЕСКИЙ интервал между
+# удачными прогонами и сравниваем с обещанным.
+CHAIN_SLACK = float(os.getenv("CHAIN_SLACK", "2.5"))   # во сколько раз можно разойтись
+CHAIN_MIN_RUNS = int(os.getenv("CHAIN_MIN_RUNS", "6"))
+
+# СРОК ЖИЗНИ PAT. Дата известна заранее и вводится руками, потому что GitHub не
+# отдаёт срок годности токена по API тому, кто им пользуется. Предупредить
+# заранее -- единственный способ не узнать об этом постфактум.
+PAT_EXPIRES = os.getenv("PAT_EXPIRES", "2026-08-28")
+PAT_WARN_DAYS = int(os.getenv("PAT_WARN_DAYS", "10"))
+
 API = "https://api.github.com"
 HEAD = {"Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {TOKEN}"}
@@ -131,6 +154,47 @@ def _save_state(s: dict):
         json.dump(s, fh)
 
 
+def _cadence_gap_min(runs) -> float:
+    """Медиана фактического интервала между удачными прогонами, в минутах.
+
+    Медиана, а не среднее: один пропущенный слот (планировщик GitHub открыто
+    ненадёжен) сдвинул бы среднее и заставил бы watchdog кричать на здоровой
+    системе. Медиана переживает одиночный выброс и ломается только тогда,
+    когда изменился сам режим -- а это ровно то, что мы хотим поймать.
+    """
+    stamps = sorted(
+        (w["updated_at"] for w in runs if w.get("conclusion") == "success"),
+        reverse=True)[:CHAIN_MIN_RUNS + 1]
+    if len(stamps) < CHAIN_MIN_RUNS:
+        return 0.0
+    gaps = []
+    for a, b in zip(stamps, stamps[1:]):
+        ta = datetime.fromisoformat(a.replace("Z", "+00:00"))
+        tb = datetime.fromisoformat(b.replace("Z", "+00:00"))
+        gaps.append((ta - tb).total_seconds() / 60)
+    gaps.sort()
+    mid = len(gaps) // 2
+    return gaps[mid] if len(gaps) % 2 else (gaps[mid - 1] + gaps[mid]) / 2
+
+
+def _expected_gap_min() -> float:
+    """Сколько минут между прогонами обещает конфиг."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import config
+        return float(config.POLL_INTERVAL_MINUTES)
+    except Exception:                                          # noqa: BLE001
+        return 5.0
+
+
+def _pat_days_left() -> float:
+    try:
+        exp = datetime.fromisoformat(PAT_EXPIRES).replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return 10 ** 6
+    return (exp - _now()).total_seconds() / 86400
+
+
 def main() -> int:
     if not TOKEN:
         print("[watchdog] GH_TOKEN missing -- nothing to do")
@@ -185,6 +249,58 @@ def main() -> int:
     elif was_down and not is_down:
         _telegram("🟢 <b>STEAMLINE — опрос снова идёт</b>\n"
                   "Выкладка прошла, данные на сайте свежие.")
+
+    # 3. цепочка жива? Отдельный вопрос от "сайт жив".
+    want = _expected_gap_min()
+    got = _cadence_gap_min(runs)
+    thinned = bool(got and want and got > want * CHAIN_SLACK)
+    was_thinned = bool(state.get("thinned"))
+    if got:
+        print(f"[watchdog] фактический интервал {got:.1f} мин против "
+              f"обещанных {want:.0f}")
+    if thinned and not was_thinned:
+        _telegram(
+            "🟠 <b>STEAMLINE — цепочка оборвалась, опрос проредился</b>\n"
+            f"Прогоны идут раз в <b>{got:.0f} мин</b> вместо обещанных "
+            f"<b>{want:.0f}</b>.\n"
+            "Сайт при этом живой и цифры свежие, поэтому обычная проверка "
+            "молчит — но движение мы теперь замечаем позже, и цена входа "
+            "становится хуже.\n"
+            "Самая частая причина — истёк или потерял права WORKFLOW_PAT. "
+            "Расписание дважды в час продолжает работать, так что это не "
+            "остановка, а деградация."
+        )
+    elif was_thinned and not thinned:
+        _telegram("🟢 <b>STEAMLINE — цепочка восстановилась</b>\n"
+                  f"Прогоны снова раз в {got:.0f} мин.")
+    state["thinned"] = thinned
+
+    # 4. PAT протухнет раньше, чем мы это заметим по последствиям
+    days = _pat_days_left()
+    warned = state.get("pat_warned_at_days")
+    if days <= PAT_WARN_DAYS:
+        step = int(days) if days > 0 else -1
+        if warned is None or step < warned:
+            if days > 0:
+                _telegram(
+                    f"🟠 <b>WORKFLOW_PAT истекает через {days:.0f} дн.</b> "
+                    f"({PAT_EXPIRES})\n"
+                    "Когда истечёт, самозапуск прекратится и опрос проредится "
+                    "с 5 минут до 30 — молча, без единой красной ошибки.\n"
+                    "Продлить: GitHub → Settings → Developer settings → "
+                    "Personal access tokens → выпустить новый с правом "
+                    "Actions: read and write на репозиторий odds-tracker → "
+                    "положить в Settings → Secrets and variables → Actions → "
+                    "WORKFLOW_PAT."
+                )
+            else:
+                _telegram(
+                    f"🔴 <b>WORKFLOW_PAT ИСТЁК</b> ({PAT_EXPIRES})\n"
+                    "Пятиминутный цикл больше не запускается. Опрос идёт по "
+                    "расписанию раз в 30 минут — данные собираются, но вход "
+                    "мы берём позже и хуже."
+                )
+            state["pat_warned_at_days"] = step
 
     state["down"] = is_down
     _save_state(state)

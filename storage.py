@@ -1919,3 +1919,141 @@ def pm_alert_is_new(fixture_id: str, outcome_name: str, leg: str) -> bool:
         return False
     set_meta(key, datetime.now(timezone.utc).isoformat())
     return True
+
+
+def pm_gap_history(limit: int = 300):
+    """Жизнь каждого зазора: когда открылся, где был лучшим, когда закрылся.
+
+    Добавлено 20.08.2026 по прямой просьбе — «собирай историю зазоров, веди по
+    ней детальную статистику чтобы мы потом от неё оттолкнулись».
+
+    Одна строка на (событие, исход, ногу). Мы смотрим на каждый открытый сигнал
+    снова и снова до самого стартового свистка, и все взгляды лежат в журнале —
+    значит можно спросить не только «был ли зазор», но и то, чего раньше нельзя
+    было спросить ни у кого:
+
+      сколько живёт зазор -- от первого появления до последнего взгляда, когда
+        он ещё держался. От этого зависит, обязан ли бот быть быстрым или может
+        быть ленивым, а это уже вопрос про инфраструктуру, а не про ставки;
+      где он был лучшим -- за сколько часов до старта площадка отставала
+        сильнее всего. Если окажется, что лучший момент устойчиво один и тот
+        же, вход можно ждать, а не хватать первый попавшийся;
+      закрылся сам или мы просто перестали смотреть -- разные вещи, и путать
+        их значит выдумывать себе упущенную выгоду.
+    """
+    with _conn() as conn:
+        rows = conn.execute(
+            """SELECT fixture_id, outcome_name, leg, sport_key, source,
+                      start_time, checked_at, lead_hours, take, edge_pct,
+                      pm_lag, exec_stake_usd, avg_coef, entry_price,
+                      event_title, down_count, books_count
+               FROM pm_quotes
+               WHERE matched = 1
+               ORDER BY fixture_id, outcome_name, leg, checked_at ASC"""
+        ).fetchall()
+
+    groups: dict[tuple, list] = {}
+    for r in rows:
+        groups.setdefault((r["fixture_id"], r["outcome_name"], r["leg"]), []).append(r)
+
+    out = []
+    for (fid, pick, leg), looks in groups.items():
+        takes = [r for r in looks if r["take"]]
+        if not takes:
+            continue
+        best = max(takes, key=lambda r: r["edge_pct"] or -999)
+        first, last = takes[0], takes[-1]
+        # Жил ли зазор до старта или закрылся раньше: если после последнего
+        # прошедшего взгляда были ещё взгляды, значит он реально закрылся, а не
+        # просто кончились наблюдения.
+        closed = looks[-1]["checked_at"] != last["checked_at"]
+        try:
+            life = (datetime.fromisoformat(last["checked_at"])
+                    - datetime.fromisoformat(first["checked_at"])).total_seconds() / 60
+        except (TypeError, ValueError):
+            life = None
+        out.append({
+            "fixture_id": fid, "pick": pick, "leg": leg,
+            "sport_key": looks[0]["sport_key"], "source": looks[0]["source"],
+            "event_title": looks[0]["event_title"],
+            "start_time": looks[0]["start_time"],
+            "looks": len(looks), "takes": len(takes),
+            "first_lead_h": first["lead_hours"], "first_edge": first["edge_pct"],
+            "best_lead_h": best["lead_hours"], "best_edge": best["edge_pct"],
+            "best_lag": best["pm_lag"], "best_stake": best["exec_stake_usd"],
+            "last_lead_h": last["lead_hours"],
+            "life_minutes": round(life, 1) if life is not None else None,
+            "closed_before_start": closed,
+            "entry_price": first["entry_price"],
+            "down_count": best["down_count"], "books_count": best["books_count"],
+        })
+    out.sort(key=lambda d: d["start_time"] or "", reverse=True)
+    return out[:limit]
+
+
+# Часовые корзины до старта. Границы не круглые ради красоты: рынок Polymarket
+# выставляется примерно за трое суток, наши сигналы приходят за 26-44 часа, а
+# последние три часа -- это когда линия там оживает. Корзины нарезаны так,
+# чтобы эти три режима не смешивались в одну кашу.
+LEAD_BUCKETS = ((36, 999, "больше 36 ч"), (12, 36, "12–36 ч"),
+                (3, 12, "3–12 ч"), (1, 3, "1–3 ч"), (0, 1, "меньше часа"))
+
+
+def pm_lag_profile():
+    """Насколько Polymarket отстаёт в зависимости от того, за сколько до старта.
+
+    Это и есть карта нашего эджа во времени. Если отставание устойчиво больше
+    вдали от матча -- входить надо рано и ждать не имеет смысла. Если наоборот,
+    ближе к старту -- значит площадка просыпается поздно и лучший вход впереди.
+    Без этой картинки выбор момента входа остаётся вкусовщиной.
+    """
+    with _conn() as conn:
+        rows = conn.execute(
+            """SELECT lead_hours, pm_lag, take, edge_pct, exec_stake_usd
+               FROM pm_quotes WHERE matched=1 AND pm_lag IS NOT NULL"""
+        ).fetchall()
+    out = []
+    for lo, hi, label in LEAD_BUCKETS:
+        sel = [r for r in rows if r["lead_hours"] is not None
+               and lo <= r["lead_hours"] < hi]
+        if not sel:
+            out.append({"label": label, "n": 0})
+            continue
+        lags = sorted(r["pm_lag"] for r in sel)
+        mid = len(lags) // 2
+        med = lags[mid] if len(lags) % 2 else (lags[mid - 1] + lags[mid]) / 2
+        takes = [r for r in sel if r["take"]]
+        edges = [r["edge_pct"] for r in takes if r["edge_pct"] is not None]
+        out.append({
+            "label": label, "n": len(sel),
+            "median_lag": round(med, 3),
+            "share_behind": round(sum(1 for r in sel if r["pm_lag"] >= 0.5)
+                                  / len(sel) * 100, 1),
+            "takes": len(takes),
+            "take_pct": round(len(takes) / len(sel) * 100, 1),
+            "avg_edge": round(sum(edges) / len(edges), 2) if edges else None,
+        })
+    return out
+
+
+def pm_gap_summary() -> dict:
+    """Свод по истории зазоров — то, от чего можно оттолкнуться."""
+    h = pm_gap_history()
+    if not h:
+        return {"gaps": 0, "profile": pm_lag_profile()}
+    lives = [g["life_minutes"] for g in h if g["life_minutes"] is not None]
+    lives.sort()
+    best_leads = [g["best_lead_h"] for g in h if g["best_lead_h"] is not None]
+    return {
+        "gaps": len(h),
+        "median_life_min": (lives[len(lives) // 2] if lives else None),
+        "closed_before_start": sum(1 for g in h if g["closed_before_start"]),
+        "median_best_lead_h": (sorted(best_leads)[len(best_leads) // 2]
+                               if best_leads else None),
+        "avg_best_edge": round(sum(g["best_edge"] or 0 for g in h) / len(h), 2),
+        "full_size": sum(1 for g in h
+                         if (g["best_stake"] or 0) >= POLYMARKET_TARGET_STAKE - 0.01),
+        "by_leg": {leg: sum(1 for g in h if g["leg"] == leg)
+                   for leg in ("aggressive", "optimal")},
+        "profile": pm_lag_profile(),
+    }

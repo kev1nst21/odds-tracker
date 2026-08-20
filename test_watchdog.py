@@ -86,3 +86,54 @@ watchdog._runs = lambda limit=40: [
 watchdog.main()
 assert not cancelled, cancelled
 print("watchdog ok: свежий прогон в очереди — это норма, не трогает")
+
+
+# --- цепочка оборвалась, а сайт живой ---------------------------------------
+# Добавлено 20.08.2026. До этого дня watchdog умел ловить только полную
+# остановку, а самая вероятная поломка у нас другая и куда тише: poll.yml
+# запускается И расписанием дважды в час, И самозапуском через WORKFLOW_PAT,
+# который даёт пятиминутный цикл. Протухнет PAT — самозапуск отвалится, а
+# расписание останется. Опрос не встанет, он проредится с 5 минут до 30.
+#
+# Проверка «давно не было удачного прогона» такого не увидит никогда: тридцать
+# минут это далеко не сто. Сайт живой, цифры свежие, всё зелёное — и только
+# вход тихо становится хуже, потому что движение мы замечаем на четверть часа
+# позже. Ровно этот случай тест и описывает.
+import watchdog as _wd  # noqa: E402
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz  # noqa: E402
+
+
+def _runs_every(minutes, n=8):
+    base = _dt.now(_tz.utc)
+    return [{"conclusion": "success",
+             "updated_at": (base - _td(minutes=minutes * i)).isoformat().replace("+00:00", "Z")}
+            for i in range(n)]
+
+
+healthy = _wd._cadence_gap_min(_runs_every(5))
+assert 4.5 <= healthy <= 5.5, healthy
+degraded = _wd._cadence_gap_min(_runs_every(30))
+assert 29 <= degraded <= 31, degraded
+assert not (healthy > 5 * _wd.CHAIN_SLACK), "здоровая цепочка принята за проредившуюся"
+assert degraded > 5 * _wd.CHAIN_SLACK, "прореживание 5 → 30 мин не поймано"
+print(f"watchdog ok: интервал считается ({healthy:.0f} мин против {degraded:.0f}) "
+      f"и прореживание вчетверо ловится порогом ×{_wd.CHAIN_SLACK}")
+
+# Один пропущенный слот — не повод кричать. Планировщик GitHub открыто
+# ненадёжен, и watchdog, срабатывающий на здоровой системе, будет заглушён, а
+# заглушённый watchdog хуже, чем никакого.
+bumpy = _runs_every(5, 9)
+bumpy[3]["updated_at"] = (_dt.fromisoformat(bumpy[3]["updated_at"].replace("Z", "+00:00"))
+                          - _td(minutes=40)).isoformat().replace("+00:00", "Z")
+assert _wd._cadence_gap_min(bumpy) <= 5 * _wd.CHAIN_SLACK, "одиночный пропуск поднял тревогу"
+print("watchdog ok: одиночный пропущенный слот тревогу не поднимает — считаем медиану")
+
+# Мало данных — молчим, а не гадаем.
+assert _wd._cadence_gap_min(_runs_every(5, 2)) == 0.0
+print("watchdog ok: на двух прогонах вывод не делается")
+
+# И срок жизни PAT: предупреждаем ЗАРАНЕЕ, а не по факту.
+left = _wd._pat_days_left()
+assert isinstance(left, float)
+print(f"watchdog ok: до истечения WORKFLOW_PAT ({_wd.PAT_EXPIRES}) осталось "
+      f"{left:.1f} дн., предупреждать начинаем за {_wd.PAT_WARN_DAYS}")

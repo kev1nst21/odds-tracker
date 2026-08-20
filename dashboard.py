@@ -1013,6 +1013,73 @@ def _breakdown_block(bd: dict) -> str:
     )
 
 
+def _pm_gap_block() -> str:
+    """История зазоров: сколько живут, где были лучшими, как затухают.
+
+    Добавлено 20.08.2026: «собирай историю зазоров, веди по ней детальную
+    статистику чтобы мы потом от неё оттолкнулись».
+
+    Две таблицы отвечают на два разных вопроса, и оба до сегодняшнего дня были
+    без ответа. КАРТА ВО ВРЕМЕНИ говорит, за сколько часов до старта площадка
+    отстаёт сильнее всего — то есть когда вообще имеет смысл входить. ЖИЗНЬ
+    КАЖДОГО ЗАЗОРА говорит, сколько минут у нас есть на решение — а это уже не
+    про ставки, а про то, каким должен быть бот: быстрым или спокойным.
+    """
+    g = storage.pm_gap_summary()
+    prof = [b for b in g.get("profile", []) if b.get("n")]
+    if not prof and not g.get("gaps"):
+        return ("<h3 class='pm-h3'>История зазоров</h3>"
+                "<p class='lead small'>Журнал только начал наполняться. Каждый "
+                "открытый сигнал опрашивается на Polymarket снова и снова до "
+                "стартового свистка, и каждый взгляд ложится строкой — поэтому "
+                "через сутки здесь появится то, чего нельзя посмотреть нигде "
+                "больше: сколько живёт зазор и за сколько часов до матча эта "
+                "площадка отстаёт сильнее всего.</p>")
+
+    out = ["<h3 class='pm-h3'>История зазоров</h3>"]
+    if prof:
+        rows = []
+        for b in prof:
+            edge = f"+{b['avg_edge']:.1f}%" if b.get("avg_edge") is not None else "—"
+            rows.append(
+                f"<tr><td>{html.escape(b['label'])}</td>"
+                f"<td class='num'>{b['n']}</td>"
+                f"<td class='num'>{b['median_lag']:.2f}</td>"
+                f"<td class='num'>{b['share_behind']:.0f}%</td>"
+                f"<td class='num'>{b['take_pct']:.0f}%</td>"
+                f"<td class='num'>{edge}</td></tr>")
+        out.append(
+            "<p class='lead small'>Карта эджа во времени. <b>Отставание</b> — "
+            "медиана по всем взглядам в этой корзине: единица значит, что "
+            "площадка стоит на цене до движения, ноль — что отыграла всё. "
+            "Если отставание устойчиво выше вдали от матча, входить надо рано "
+            "и ждать бессмысленно; если наоборот — площадка просыпается "
+            "поздно, и лучший вход ещё впереди.</p>"
+            "<div class='bd-scroll'><table class='bd'><thead><tr>"
+            "<th>до старта</th><th class='num'>взглядов</th>"
+            "<th class='num'>отставание</th><th class='num'>отстаёт ≥0.5</th>"
+            "<th class='num'>проходит вход</th><th class='num'>средний зазор</th>"
+            f"</tr></thead><tbody>{''.join(rows)}</tbody></table></div>")
+
+    if g.get("gaps"):
+        life = g.get("median_life_min")
+        life_s = ("—" if life is None else
+                  (f"{life:.0f} мин" if life < 120 else f"{life/60:.1f} ч"))
+        lead = g.get("median_best_lead_h")
+        out.append(
+            "<p class='lead small' style='margin-top:14px'>"
+            f"Зазоров в истории: <b>{g['gaps']}</b>. "
+            f"Медианная жизнь одного: <b>{life_s}</b> — столько времени есть у "
+            f"бота на решение. Лучшая цена в среднем встречалась за "
+            f"<b>{('—' if lead is None else format(lead, '.0f') + ' ч')}</b> до "
+            f"старта. Закрылись до матча сами: <b>{g['closed_before_start']}</b> "
+            f"из {g['gaps']} — остальные дожили до свистка. Полный размер "
+            f"влезал в <b>{g['full_size']}</b>. По ногам: прямая "
+            f"{g['by_leg']['aggressive']}, двойной шанс {g['by_leg']['optimal']}."
+            "</p>")
+    return "".join(out)
+
+
 def _pm_rule_note() -> str:
     """Почему порог именно такой. Одно предложение, но без него правило голое."""
     if POLYMARKET_MIN_EDGE_PCT <= 0:
@@ -1220,6 +1287,8 @@ def _pm_section() -> str:
   бывает только прямая.</p>
 
   {cov_html}
+
+  {_pm_gap_block()}
 
   {results_html}
 '''
@@ -1753,6 +1822,15 @@ def _write_ledger(agg: dict) -> None:
         # When the record gets scored. Published so "где мой результат"
         # has an answer that is a timestamp rather than a silence.
         "grading": _grading_state(),
+        # История зазоров едет вместе с журналом намеренно: решения по
+        # порогам будут приниматься по ней, а число, на котором стоит
+        # решение, обязано лежать там, где его может пересчитать кто угодно.
+        "polymarket": {
+            **storage.pm_stats(),
+            "gaps": storage.pm_gap_summary(),
+            "results": storage.pm_results(),
+            "coverage_by_sport": storage.pm_coverage_by_sport(),
+        },
         "count": len(rows),
         "signals": rows,
     }
