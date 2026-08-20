@@ -150,6 +150,12 @@ jobs:
           # MOVEMENTS -- a bookmaker shifting a total from 2.5 to 3.5 read as a
           # 37% price move -- so it runs before every poll, not nightly.
           python test_markets.py
+          # Polymarket. Vladislav's rule is "at least 5% better than the best
+          # bookmaker price"; this suite pins the arithmetic of that rule, the
+          # name matching that decides WHICH market we compare against, and the
+          # shape of pm_signals.json -- which a live trading bot reads. A
+          # silently renamed field there is a bot acting on nothing.
+          python test_polymarket.py
 
       - name: Poll the market for this window
         env:
