@@ -145,6 +145,11 @@ jobs:
           # states in prose to the constant that governs it.
           python test_stars_invariance.py
           python test_site_claims.py
+          # Added 2026-08-20 with the purchase of spreads and totals. It is the
+          # one suite whose failure would mean we are PUBLISHING INVENTED
+          # MOVEMENTS -- a bookmaker shifting a total from 2.5 to 3.5 read as a
+          # 37% price move -- so it runs before every poll, not nightly.
+          python test_markets.py
 
       - name: Poll the market for this window
         env:
