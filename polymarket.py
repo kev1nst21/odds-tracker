@@ -52,11 +52,10 @@ from config import (
     POLYMARKET_TAGS,
     POLYMARKET_INDEX_TTL_MINUTES,
     POLYMARKET_DATE_WINDOW_HOURS,
-    PM_STARS_2_EDGE,
-    PM_STARS_3_EDGE,
-    PM_STARS_4_EDGE,
-    PM_STARS_FULL_SIZE_FROM,
-    PM_STARS_4_MIN_BASE,
+    PM_LAG_3_STARS,
+    PM_LAG_4_STARS,
+    MOVED_FOR_3_STARS,
+    MOVED_FOR_4_STARS,
 )
 
 GAMMA = "https://gamma-api.polymarket.com"
@@ -225,13 +224,22 @@ def due_in_minutes(lead_hours: float, matched: bool) -> int:
     Найденный матч ужесточает шаг: если рынок уже есть, движение цены важнее
     самого факта появления.
     """
+    # Ужесточено 20.08 вечером: «полимаркет обновляй чаще остальных». Опрос
+    # котировок жёстко привязан к кредитам и потому редок; здесь оба эндпоинта
+    # бесплатные, и единственная цена частоты -- время цикла. Поэтому уже
+    # найденный рынок в пределах суток смотрится КАЖДЫЙ цикл: там есть цена, и
+    # она ходит, а пропущенный цикл -- это, возможно, тот самый зазор.
+    #
+    # Ненайденный смотрится реже и это не лень: их список открытых матчей
+    # укладывается в трое суток, так что за полтора дня до старта рынка там
+    # чаще всего просто нет, и сотый запрос ответит то же, что первый.
     if lead_hours > 36:
-        return 60 if matched else 240
-    if lead_hours > 12:
         return 30 if matched else 120
+    if lead_hours > 12:
+        return 10 if matched else 45
     if lead_hours > 3:
-        return 10 if matched else 30
-    return 0  # последние часы -- каждый цикл
+        return 0 if matched else 15
+    return 0  # последние часы -- каждый цикл, независимо от всего
 
 
 # --------------------------------------------------------------------------
@@ -462,7 +470,9 @@ def plan_entry(asks: list[tuple[float, float]],
 
 def check(home: str, away: str, start_iso: str, pick_name: str,
           entry_price: float, opt_price: float = None,
-          events: list[dict] = None) -> list[dict]:
+          events: list[dict] = None, old_price: float = None,
+          new_price: float = None, down_count: int = 0,
+          books_count: int = 0) -> list[dict]:
     """Одна проверка одного события — но по ОБЕИМ ногам.
 
     Возвращает список: по строке на каждую найденную ногу (агрессивную и
@@ -493,7 +503,15 @@ def check(home: str, away: str, start_iso: str, pick_name: str,
 
         bench = {"aggressive": entry_price, "optimal": opt_price}
         out = []
-        for name, leg in legs.items():
+        # Отставание -- свойство СОБЫТИЯ, а не отдельной ноги: оно отвечает на
+        # вопрос "насколько эта площадка вообще заметила движение". Считаем его
+        # один раз по основному рынку и вешаем на обе ноги, потому что двойной
+        # шанс переставляется вслед за победой, а не сам по себе.
+        lag = None
+        for name in ("aggressive", "optimal"):
+            leg = legs.get(name)
+            if leg is None:
+                continue
             price = bench.get(name)
             if not price:
                 # Нет цены у конторы -- сравнивать не с чем. Пишем строкой, а не
@@ -513,8 +531,11 @@ def check(home: str, away: str, start_iso: str, pick_name: str,
                             "take": False, "exec_stake_usd": 0.0})
                 continue
             plan = plan_entry(asks, price)
+            if name == "aggressive":
+                lag = pm_lag(plan.get("best_coef"), old_price, new_price)
             out.append({
                 **base, "leg": name, "matched": True, **meta,
+                "pm_lag": lag, "down_count": down_count, "books_count": books_count,
                 "token_id": leg["token_id"], "outcome": leg["outcome"],
                 "shape": leg["shape"], "question": leg.get("question"),
                 "means": leg.get("means"),
@@ -530,35 +551,90 @@ def check(home: str, away: str, start_iso: str, pick_name: str,
 # Звёзды Polymarket
 # --------------------------------------------------------------------------
 
-def pm_stars(edge_pct: Optional[float], exec_stake: float, base_stars: int = 0,
-             target: float = None) -> int:
-    """Уровень доверия к сделке НА POLYMARKET. Не копия букмекерской шкалы.
+def pm_lag(pm_coef: float, old_price: float, new_price: float):
+    """Какую долю движения Polymarket ЕЩЁ НЕ отыграл. Это и есть наш эдж.
 
-    Наша обычная лестница считает, у скольких контор поехала линия. Здесь это
-    только один из трёх множителей, и не главный: на Polymarket сделку делает
-    зазор, а зазор без глубины — не сделка, а картинка. Пять процентов на
-    двадцать долларов и двенадцать на полный размер отличаются не степенью, а
-    родом.
+    Мысль Владислава, 20.08: «звёзды от полимаркета должны исходить из
+    вероятности того что ставить надо, а не процентов и повышения. Если мы
+    видим что на большом количестве просело БК, а на полике нет — то это
+    охуенно».
 
-    Ступени:
-      ★★    зазор от PM_STARS_2_EDGE (это же порог входа: ниже мы не ставим)
-      ★★★   зазор от PM_STARS_3_EDGE И влезает полный размер
-      ★★★★  зазор от PM_STARS_4_EDGE И полный размер И наш сигнал от 3★
+    Он прав, и прежняя шкала по размеру зазора мерила не то. Зазор в процентах
+    отвечает на вопрос «насколько тут дешевле», а деньги приносит ответ на
+    другой: «насколько этот рынок ещё не понял того, что уже поняли все
+    остальные». Это разные величины, и совпадают они только случайно.
 
-    Ноль означает «сделки нет», а не «плохая сделка» — ниже порога мы просто
-    не ставим, и смешивать эти два состояния нельзя.
+    Считается так. Движение у контор идёт от old_price к new_price — это
+    расстояние, которое рынок уже прошёл на деньгах. Смотрим, где на этом
+    отрезке стоит Polymarket:
+
+        lag = (pm_coef - new_price) / (old_price - new_price)
+
+        1.0  Polymarket стоит на ДОвиженческой цене. Не шелохнулся. Максимум:
+             мы берём вчерашнюю цену на рынке, который вот-вот переставят.
+        0.5  отыграл половину движения.
+        0.0  отыграл полностью, стоит там же, где конторы после движения.
+             Зазора по смыслу нет, даже если арифметически он есть.
+       <0.0  Polymarket УШЁЛ ДАЛЬШЕ контор. Там уже знают больше нашего, и
+             наше «движение» для них старая новость.
+       >1.0  стоит выше, чем контора ДО движения. Лучше не бывает.
+
+    None, если движения не было (old == new) — тогда мерить нечего, и врать
+    числом нельзя.
+    """
+    try:
+        span = float(old_price) - float(new_price)
+        if span <= 0:
+            return None
+        return round((float(pm_coef) - float(new_price)) / span, 4)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def pm_stars(lag=None, down_count: int = 0, books_count: int = 0,
+             exec_stake: float = 0.0, target: float = None,
+             edge_pct=None) -> int:
+    """Насколько это хорошая сделка НА POLYMARKET. Две величины, обе нужны.
+
+    ШИРИНА — у скольких контор поехала линия. Это вероятность того, что
+    движение вообще настоящее, а не чья-то разовая ставка. Одна контора может
+    ошибиться, сорок независимых — нет.
+
+    ОТСТАВАНИЕ — насколько Polymarket этого ещё не заметил. Это то, сколько
+    нам достанется.
+
+    Ни одна из двух в одиночку ничего не стоит, и в этом весь смысл. Сорок
+    контор поехали, а Polymarket уже переставился — движение настоящее, но
+    денег в нём для нас нет. Polymarket стоит колом, а поехали две конторы —
+    он, скорее всего, просто прав, и это мы шумим, а не он. Деньги живут
+    ровно на пересечении: РЫНОК УВЕРЕН, А ЭТА ПЛОЩАДКА ЕЩЁ НЕ ЗНАЕТ.
+
+        ★★★★  ширина от MOVED_FOR_4_STARS контор И отставание от 0.8
+              И влезает полный размер
+        ★★★   ширина от MOVED_FOR_3_STARS контор И отставание от 0.5
+        ★★    прошло правило входа (цена не хуже конторы), но одно из двух
+              условий не выполнено
+
+    Ноль означает «сделки нет», а не «плохая сделка»: ниже порога входа мы не
+    ставим вовсе, и смешивать эти два состояния нельзя.
+
+    edge_pct принимается только ради совместимости со старыми записями в
+    журнале, где ширины и отставания ещё не сохранялось. Новые оценки на него
+    не опираются.
     """
     tgt = POLYMARKET_TARGET_STAKE if target is None else target
-    if edge_pct is None or edge_pct < PM_STARS_2_EDGE or exec_stake <= 0:
+    if exec_stake <= 0:
         return 0
+    if lag is None:
+        # Старая запись без отставания: честно отдаём нижнюю ступень, а не
+        # выдумываем оценку из процента, который её не измеряет.
+        return 2 if (edge_pct is not None and edge_pct >= POLYMARKET_MIN_EDGE_PCT) else 0
     full = exec_stake >= tgt - 0.01
-    stars = 2
-    if edge_pct >= PM_STARS_3_EDGE and (full or PM_STARS_FULL_SIZE_FROM > 3):
-        stars = 3
-    if (edge_pct >= PM_STARS_4_EDGE and full
-            and (base_stars or 0) >= PM_STARS_4_MIN_BASE):
-        stars = 4
-    return stars
+    if (down_count >= MOVED_FOR_4_STARS and lag >= PM_LAG_4_STARS and full):
+        return 4
+    if down_count >= MOVED_FOR_3_STARS and lag >= PM_LAG_3_STARS:
+        return 3
+    return 2
 
 
 # --------------------------------------------------------------------------
@@ -585,9 +661,9 @@ def classify_market(question: str, outcomes: list) -> str:
     if any(w in q for w in ("corner", "exact score", "first team", "both teams",
                             "goalscorer", "card", "assist", "completed match")):
         return KIND_OTHER
-    if len(names) in (2, 3) and not set(names) & {"yes", "no"}:
-        return KIND_MONEYLINE
     if set(names) == {"yes", "no"}:
+        return KIND_MONEYLINE
+    if len(names) in (2, 3):
         return KIND_MONEYLINE
     return KIND_OTHER
 
@@ -597,8 +673,8 @@ def explode(event: dict) -> list[dict]:
 
     Просьба 20.08: «на полики раскрывай полное событие и ищи такой же вариант
     как поставить в оптимальной стратегии». Одно теннисное событие Polymarket
-    несёт полтора десятка рынков — победа, тотал сетов, тотал геймов, фора, и
-    так далее. Раньше мы смотрели только на первый и не знали, что теряем.
+    несёт полтора десятка рынков — победа, тотал сетов, тотал геймов, фора.
+    Раньше мы смотрели только на первый и не знали, что теряем.
 
     Цены здесь ВИТРИННЫЕ и годятся только на то, чтобы решить, за каким
     стаканом идти. Ставить по ним нельзя: замер 20.08 показал витрину 0.415
@@ -614,7 +690,6 @@ def explode(event: dict) -> list[dict]:
         if len(outcomes) != len(tokens) or not outcomes:
             continue
         q = m.get("question") or ""
-        kind = classify_market(q, outcomes)
         legs = []
         for i, (oc, tid) in enumerate(zip(outcomes, tokens)):
             try:
@@ -624,8 +699,8 @@ def explode(event: dict) -> list[dict]:
             legs.append({"outcome": str(oc), "token_id": str(tid),
                          "showcase_price": shop,
                          "showcase_coef": round(1.0 / shop, 4) if shop else None})
-        out.append({"question": q, "kind": kind, "closed": bool(m.get("closed")),
-                    "outcomes": legs})
+        out.append({"question": q, "kind": classify_market(q, outcomes),
+                    "closed": bool(m.get("closed")), "outcomes": legs})
     return out
 
 
@@ -655,12 +730,11 @@ def find_legs(event: dict, pick_name: str, home: str, away: str,
         if len(outcomes) != len(tokens) or not outcomes:
             continue
         q = m.get("question") or ""
-        if classify_market(q, outcomes) is KIND_OTHER or _is_prop_question(q):
+        if classify_market(q, outcomes) == KIND_OTHER or _is_prop_question(q):
             continue
         names = [str(o) for o in outcomes]
         low = [n.strip().lower() for n in names]
 
-        # Агрессивная: именованный исход = наш выбор.
         if "aggressive" not in legs:
             for n, tid in zip(names, tokens):
                 if n.strip().lower() in ("yes", "no"):
@@ -669,7 +743,6 @@ def find_legs(event: dict, pick_name: str, home: str, away: str,
                     legs["aggressive"] = {"token_id": str(tid), "outcome": n,
                                           "question": q, "shape": "named"}
                     break
-        # Агрессивная в форме вопроса: "Will <наш> win?" -> Yes.
         if "aggressive" not in legs and set(low) == {"yes", "no"}:
             if team_in(pick_name, q) and not team_in(opp, q):
                 for n, tid in zip(names, tokens):

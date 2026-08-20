@@ -172,17 +172,31 @@ print("claim ok: страница объясняет, что ступени сч
 # experiment. The stakes here are higher than anywhere else on this page: a
 # real bot places real orders on the numbers this section describes, so a
 # stale sentence is not a cosmetic problem, it is a wrong trade.
-says(f"минимум на {config.POLYMARKET_MIN_EDGE_PCT:g}% выше лучшей цены",
+# Порог опущен до нуля 20.08 вечером, и фраза обязана следовать за числом, а
+# не за первой редакцией: «минимум на 0% выше» было бы формально верно и
+# бессмысленно на слух.
+says(dashboard._pm_rule_phrase(),
      "страница обязана называть настоящий порог входа на Polymarket — по нему "
      "торгует бот, и разойтись здесь дороже, чем где-либо ещё")
-for edge in (config.PM_STARS_2_EDGE, config.PM_STARS_3_EDGE, config.PM_STARS_4_EDGE):
-    says(f"зазор от {edge:g}%",
-         f"страница обязана называть порог ступени в {edge:g}%")
-says(f"наш сигнал от {config.PM_STARS_4_MIN_BASE}★",
-     "верхняя ступень требует сильного сигнала — это обязано быть сказано")
-print(f"claim ok: Polymarket — порог входа {config.POLYMARKET_MIN_EDGE_PCT:g}%, "
-      f"ступени от {config.PM_STARS_2_EDGE:g}/{config.PM_STARS_3_EDGE:g}/"
-      f"{config.PM_STARS_4_EDGE:g}%")
+if config.POLYMARKET_MIN_EDGE_PCT <= 0:
+    says("не хуже лучшей цены", "при нулевом пороге правило формулируется словами")
+    says("Хуже — не берём", "страница обязана сказать, что хуже конторы мы не ставим")
+# Шкала переписана вечером 20.08: она измеряет не размер зазора, а ОТСТАВАНИЕ
+# площадки от движения, помноженное на ширину этого движения. Идея Владислава:
+# «если мы видим что на большом количестве просело БК, а на полике нет — это
+# охуенно». Страница обязана описывать ту шкалу, которая работает, а не ту,
+# которая была утром.
+for n_books in (config.MOVED_FOR_3_STARS, config.MOVED_FOR_4_STARS):
+    says(f"от {n_books} контор", f"страница обязана называть ширину для ступени")
+for lag in (config.PM_LAG_3_STARS, config.PM_LAG_4_STARS):
+    says(f"отставание от {lag:g}", f"страница обязана называть порог отставания {lag:g}")
+says("отставание", "страница обязана вводить понятие отставания площадки")
+assert "зазор от" not in text, (
+    "на странице осталась старая шкала по проценту зазора — она перестала быть "
+    "правдой, когда оценка стала считаться по отставанию и ширине")
+print(f"claim ok: Polymarket — вход {dashboard._pm_rule_phrase()}, ступени по "
+      f"ширине {config.MOVED_FOR_3_STARS}/{config.MOVED_FOR_4_STARS} контор и "
+      f"отставанию {config.PM_LAG_3_STARS:g}/{config.PM_LAG_4_STARS:g}")
 
 # And the honest disclaimer about the two legs must survive any redesign: they
 # are NOT a hedge, and a reader who thinks otherwise is mispricing their risk.

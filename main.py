@@ -223,6 +223,7 @@ def _sweep_polymarket(now):
 
     index = polymarket.build_index()
     looks = takes = 0
+    alerts = []
     for row in cands:
         start = row.get("start_time")
         try:
@@ -250,7 +251,10 @@ def _sweep_polymarket(now):
         for res in polymarket.check(
                 row["home_team"], row["away_team"], str(start),
                 row["outcome_name"], row.get("entry_price"),
-                opt_price=row.get("opt_price"), events=index):
+                opt_price=row.get("opt_price"), events=index,
+                old_price=row.get("old_price"), new_price=row.get("new_price"),
+                down_count=row.get("down_count") or 0,
+                books_count=row.get("books_count") or 0):
             looks += 1
             res.update({
                 "fixture_id": row["fixture_id"], "outcome_name": row["outcome_name"],
@@ -260,9 +264,26 @@ def _sweep_polymarket(now):
             storage.save_pm_quote(res)
             if res.get("take"):
                 takes += 1
+                if storage.pm_alert_is_new(row["fixture_id"], row["outcome_name"],
+                                           res.get("leg") or "aggressive"):
+                    res["pm_stars"] = polymarket.pm_stars(
+                        res.get("pm_lag"), row.get("down_count") or 0,
+                        row.get("books_count") or 0, res.get("exec_stake_usd") or 0)
+                    res["max_price"] = (round(1.0 / res["need_coef"], 4)
+                                        if res.get("need_coef") else None)
+                    res["home_team"] = row.get("home_team")
+                    res["away_team"] = row.get("away_team")
+                    alerts.append(res)
                 print(f"[polymarket] ЗАЗОР ({res.get('leg')}): {row['outcome_name']} — "
                       f"БК {res.get('entry_price')}, стакан {res.get('avg_coef')}, "
                       f"+{res.get('edge_pct')}% на ${res.get('exec_stake_usd')}")
+    if alerts:
+        # Красным и немедленно: зазор на ордербуке живёт минутами, и сводка
+        # через час равносильна неотправленному сообщению.
+        try:
+            notifier.notify_polymarket(alerts, dashboard_url=DASHBOARD_URL)
+        except Exception as e:                                # noqa: BLE001
+            print(f"[polymarket] уведомление не ушло: {e!r}")
     return looks, takes
 
 

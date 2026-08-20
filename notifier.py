@@ -334,3 +334,45 @@ def _format_seen_only(moves: list, limit: int) -> str:
             "<i>Мы сюда не заходим — но деньги там были. Если у тебя есть контора,"
             " которая ещё не подвинулась, смотри сам.</i>\n"
             + "\n".join(lines) + extra)
+
+
+def notify_polymarket(rows: list, dashboard_url: str = None) -> int:
+    """КРАСНЫЙ сигнал: на Polymarket появилась цена, которую стоит взять.
+
+    Отдельно от общей рассылки и намеренно громко. Просьба 20.08: «если есть
+    ставка которая нам подходит сразу в бота мне тригери красным
+    уведомлением». Причина не в оформлении: зазор на ордербуке живёт минуты, а
+    не часы, и сообщение, потерявшееся среди сводок, равносильно
+    неотправленному.
+
+    Дедуп ложится на вызывающего: сюда приходит только то, что действительно
+    ново, иначе один и тот же зазор звонил бы каждый цикл, пока он открыт, и
+    красный цвет обесценился бы за вечер.
+    """
+    if not rows:
+        return 0
+    parts = []
+    for r in rows[:6]:
+        leg = "прямая" if r.get("leg") == "aggressive" else "двойной шанс"
+        size = r.get("exec_stake_usd") or 0
+        full = "" if r.get("fits_target") else " (частично)"
+        lag = r.get("pm_lag")
+        lag_s = ("—" if lag is None else f"{lag:.2f}")
+        stars = "\u2605" * int(r.get("pm_stars") or 0)
+        parts.append(
+            f"\U0001F534 <b>{html.escape(str(r.get('outcome_name')))}</b> {stars}\n"
+            f"{html.escape(str(r.get('home_team') or ''))} — "
+            f"{html.escape(str(r.get('away_team') or ''))}\n"
+            f"вариант: {leg}\n"
+            f"контора: <b>{r.get('entry_price')}</b> → "
+            f"Polymarket: <b>{r.get('avg_coef')}</b> "
+            f"(+{r.get('edge_pct')}%)\n"
+            f"влезает: <b>${size:,.0f}</b>{full}\n".replace(",", " ") +
+            f"отставание площадки: {lag_s}\n"
+            f"лимит цены: не выше {r.get('max_price')}"
+        )
+    tail = f"\n\n<a href=\"{dashboard_url}#polymarket\">разбор на сайте</a>" if dashboard_url else ""
+    head = ("\U0001F534 <b>POLYMARKET — ЕСТЬ ВХОД</b>\n"
+            "<i>цена там не хуже нашей конторы, стакан держит объём</i>\n\n")
+    send_telegram_message(head + "\n\n".join(parts) + tail)
+    return len(parts)

@@ -247,6 +247,12 @@ _MIGRATIONS = {
         "question": "TEXT",
         "means": "TEXT",
         "markets_total": "INTEGER",
+        # Насколько Polymarket ещё НЕ отыграл движение контор: 1.0 -- стоит на
+        # доviженческой цене, 0.0 -- отыграл полностью. Это, а не размер
+        # зазора в процентах, и есть наш эдж, и на этом строится оценка сделки.
+        "pm_lag": "REAL",
+        "down_count": "INTEGER",
+        "books_count": "INTEGER",
     },
     "movements": {
         # "had_entry" used to mean "a bookmaker was still offering the old
@@ -1487,8 +1493,8 @@ def save_pm_quote(row: dict) -> None:
                      lead_hours, matched, reason, event_title, event_slug, token_id,
                      entry_price, need_coef, best_coef, avg_coef, exec_stake_usd,
                      fits_target, edge_pct, take, leg, source, question, means,
-                     markets_total)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     markets_total, pm_lag, down_count, books_count)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (row.get("checked_at"), row.get("fixture_id"), row.get("outcome_name"),
                  row.get("sport_key"), row.get("start_time"), row.get("lead_hours"),
@@ -1499,7 +1505,8 @@ def save_pm_quote(row: dict) -> None:
                  1 if row.get("fits_target") else 0, row.get("edge_pct"),
                  1 if row.get("take") else 0, row.get("leg") or "aggressive",
                  row.get("source") or "signal", row.get("question"),
-                 row.get("means"), row.get("markets_total")),
+                 row.get("means"), row.get("markets_total"), row.get("pm_lag"),
+                 row.get("down_count"), row.get("books_count")),
             )
             conn.commit()
     except sqlite3.Error:
@@ -1529,7 +1536,8 @@ def pm_candidates(limit: int = 250):
     with _conn() as conn:
         rows = [dict(r) | {"source": "signal"} for r in conn.execute(
             """SELECT fixture_id, sport_key, home_team, away_team, outcome_name,
-                      stars, entry_price, opt_price, start_time
+                      stars, entry_price, opt_price, start_time,
+                      old_price, new_price, down_count, books_count
                FROM tracked_alerts
                WHERE kind='prematch' AND resolved=0
                  AND start_time IS NOT NULL AND start_time > ?
@@ -1538,7 +1546,8 @@ def pm_candidates(limit: int = 250):
         seen = {(r["fixture_id"], r["outcome_name"]) for r in rows}
         for r in conn.execute(
             """SELECT fixture_id, sport_key, home_team, away_team, outcome_name,
-                      stars, entry_price, best_left_price, start_time
+                      stars, entry_price, best_left_price, start_time,
+                      old_price, new_price, down_count, books_count
                FROM movements
                WHERE resolved=0 AND start_time IS NOT NULL AND start_time > ?
                ORDER BY start_time ASC LIMIT ?""",
@@ -1795,7 +1804,7 @@ def pm_settled(limit: int = 500):
             SELECT q.fixture_id, q.outcome_name, q.leg, q.source, q.sport_key,
                    q.start_time, q.lead_hours, q.event_title, q.event_slug,
                    q.entry_price, q.avg_coef, q.exec_stake_usd, q.edge_pct,
-                   q.fits_target, q.means,
+                   q.fits_target, q.means, q.pm_lag, q.down_count, q.books_count,
                    a.result AS result, a.stars AS base_stars,
                    a.home_team AS home_team, a.away_team AS away_team,
                    a.opt_result AS opt_result
@@ -1858,8 +1867,9 @@ def pm_results() -> dict:
 
     by_stars = {}
     for r in rows:
-        k = polymarket.pm_stars(r["edge_pct"], r["exec_stake_usd"] or 0,
-                                r["base_stars"] or 0)
+        k = polymarket.pm_stars(r["pm_lag"], r["down_count"] or 0,
+                                r["books_count"] or 0, r["exec_stake_usd"] or 0,
+                                edge_pct=r["edge_pct"])
         by_stars.setdefault(k, []).append(r)
 
     return {
@@ -1894,3 +1904,18 @@ def pm_coverage_by_sport(hours: int = 24 * 30):
                FROM pm_quotes WHERE checked_at >= ? AND sport_key IS NOT NULL
                GROUP BY sport_key ORDER BY total DESC""", (since,)).fetchall()
     return [dict(r) for r in seen]
+
+
+def pm_alert_is_new(fixture_id: str, outcome_name: str, leg: str) -> bool:
+    """Звонить ли по этому зазору. Один раз на (событие, исход, ногу).
+
+    Без этого красное уведомление приходило бы каждые пять минут, пока зазор
+    открыт, и красный цвет перестал бы что-либо значить к вечеру первого дня.
+    Ключ ровно тот же, по которому дедуплицируется бот, — чтобы «нам позвонили»
+    и «бот вошёл» означали одно и то же событие, а не два разных.
+    """
+    key = f"pm_alert:{fixture_id}|{outcome_name}|{leg}"
+    if get_meta(key):
+        return False
+    set_meta(key, datetime.now(timezone.utc).isoformat())
+    return True
