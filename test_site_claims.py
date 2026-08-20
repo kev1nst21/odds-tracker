@@ -167,6 +167,31 @@ says("одинаковой суммой",
      "иначе таблица «по звёздам» ничего не доказывает")
 print("claim ok: страница объясняет, что ступени считаются одинаковой суммой")
 
+# --- Polymarket: the page must state the rule the trader actually follows ---
+# Added 20.08.2026, when Polymarket became the product rather than a side
+# experiment. The stakes here are higher than anywhere else on this page: a
+# real bot places real orders on the numbers this section describes, so a
+# stale sentence is not a cosmetic problem, it is a wrong trade.
+says(f"минимум на {config.POLYMARKET_MIN_EDGE_PCT:g}% выше лучшей цены",
+     "страница обязана называть настоящий порог входа на Polymarket — по нему "
+     "торгует бот, и разойтись здесь дороже, чем где-либо ещё")
+for edge in (config.PM_STARS_2_EDGE, config.PM_STARS_3_EDGE, config.PM_STARS_4_EDGE):
+    says(f"зазор от {edge:g}%",
+         f"страница обязана называть порог ступени в {edge:g}%")
+says(f"наш сигнал от {config.PM_STARS_4_MIN_BASE}★",
+     "верхняя ступень требует сильного сигнала — это обязано быть сказано")
+print(f"claim ok: Polymarket — порог входа {config.POLYMARKET_MIN_EDGE_PCT:g}%, "
+      f"ступени от {config.PM_STARS_2_EDGE:g}/{config.PM_STARS_3_EDGE:g}/"
+      f"{config.PM_STARS_4_EDGE:g}%")
+
+# And the honest disclaimer about the two legs must survive any redesign: they
+# are NOT a hedge, and a reader who thinks otherwise is mispricing their risk.
+says("проигрывают вместе",
+     "страница обязана сказать, что две ноги не страхуют друг друга — иначе "
+     "читатель посчитает риск вдвое меньше настоящего")
+assert "страховка" in text, "нет явного отрицания страховки"
+print("claim ok: страница честно говорит, что две ноги — не хедж")
+
 # --- the two strategies ------------------------------------------------------
 says(f"коэффициентом не выше {config.OPTIMAL_MAX_PRICE:g}",
      "описание оптимальной стратегии обязано называть настоящий потолок цены")

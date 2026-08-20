@@ -31,6 +31,10 @@ import storage
 from config import (
     POLYMARKET_MIN_EDGE_PCT,
     POLYMARKET_TARGET_STAKE,
+    PM_STARS_2_EDGE,
+    PM_STARS_3_EDGE,
+    PM_STARS_4_EDGE,
+    PM_STARS_4_MIN_BASE,
     MOVED_FOR_2_STARS,
     MOVED_FOR_3_STARS,
     MOVED_FOR_4_STARS,
@@ -1009,6 +1013,190 @@ def _breakdown_block(bd: dict) -> str:
     )
 
 
+def _pm_section() -> str:
+    """Polymarket на витрине: покрытие, живые зазоры, звёзды, результаты.
+
+    Добавлено 20.08.2026. К этому моменту весь конвейер уже искал зазоры и
+    писал их в журнал, но на сайте этого не было видно вообще — а Polymarket
+    стал основой продукта, а не приложением к нему. Страница, которая не
+    показывает главного, врёт молчанием.
+
+    Порядок разделов не декоративный. Сначала ПОКРЫТИЕ, потому что если наших
+    событий там нет, всё остальное бессмысленно. Потом ЖИВЫЕ ЗАЗОРЫ — то, на
+    что можно нажать прямо сейчас. Потом ЗВЁЗДЫ, потому что читателю надо
+    объяснить, чем оценка сделки отличается от оценки движения. И только потом
+    РЕЗУЛЬТАТЫ: они появляются последними и в реальности тоже приходят
+    последними.
+    """
+    st = storage.pm_stats()
+    live = storage.pm_live_feed()
+    res = storage.pm_results()
+    cov = storage.pm_coverage_by_sport()
+
+    def n(v, suf=""):
+        return f"{v}{suf}" if v is not None else "—"
+
+    kpis = (
+        "<section class='kpis'>"
+        f"<div class='kpi cy reveal'><b>{st['signals']}</b><span>"
+        f"{_plural(st['signals'], 'сигнал проверен', 'сигнала проверено', 'сигналов проверено')}</span></div>"
+        f"<div class='kpi reveal'><b>{st['matched']}</b><span>нашлись на Polymarket</span></div>"
+        f"<div class='kpi reveal'><b>{n(st['match_pct'], '%')}</b><span>покрытие</span></div>"
+        f"<div class='kpi lime reveal'><b>{st['opportunities']}</b><span>зазоров найдено</span></div>"
+        f"<div class='kpi mag reveal'><b>{n(st['avg_edge_pct'], '%')}</b><span>средний зазор</span></div>"
+        f"<div class='kpi reveal'><b>{st['looks']}</b><span>снятий стакана</span></div>"
+        "</section>"
+    )
+
+    if live:
+        rows = []
+        for r in live:
+            leg = "прямая" if r["leg"] == "aggressive" else "двойной шанс"
+            size = f"${r['exec_stake_usd']:,.0f}".replace(",", " ")
+            full = "" if r["fits_target"] else " <i>частично</i>"
+            rows.append(
+                f"<tr>{_stars_cell(_pm_stars_of(r))}"
+                f"<td>{html.escape(str(r['outcome_name']))}"
+                f"<span class='sub'>{html.escape(str(r['home_team']))} — "
+                f"{html.escape(str(r['away_team']))}</span></td>"
+                f"<td>{leg}</td>"
+                f"<td class='num'>{r['entry_price']:.2f}</td>"
+                f"<td class='num'>{r['avg_coef']:.2f}</td>"
+                f"<td class='num pos'>+{r['edge_pct']:.1f}%</td>"
+                f"<td class='num'>{size}{full}</td></tr>")
+        live_html = (
+            "<div class='bd-scroll'><table class='bd'><thead><tr>"
+            "<th>оценка</th><th>ставка</th><th>вариант</th><th class='num'>контора</th>"
+            "<th class='num'>Polymarket</th><th class='num'>лучше на</th>"
+            "<th class='num'>влезает</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table></div>")
+    else:
+        live_html = ("<p class='lead small'>Прямо сейчас открытых зазоров нет. "
+                     "Это нормальное состояние, а не поломка: порог в "
+                     f"{POLYMARKET_MIN_EDGE_PCT:g}% строгий, и чаще всего Polymarket "
+                     "стоит вровень с конторами или хуже. Строка появляется здесь "
+                     "ровно в тот момент, когда там становится выгоднее.</p>")
+
+    cov_html = ""
+    if cov:
+        crows = []
+        for c in sorted(cov, key=lambda x: -x["total"]):
+            pct = c["matched"] / c["total"] * 100 if c["total"] else 0
+            crows.append(
+                f"<tr><td>{html.escape(_sport_label(c['sport_key']))}</td>"
+                f"<td class='num'>{c['total']}</td>"
+                f"<td class='num'>{c['matched']}</td>"
+                f"<td class='num'>{pct:.0f}%</td>"
+                f"<td class='num'>{c['took']}</td></tr>")
+        cov_html = (
+            "<h3 class='pm-h3'>Где Polymarket нас вообще котирует</h3>"
+            "<p class='lead small'>Считается, а не предполагается. Совпадение "
+            "события — главная инженерная сложность всей затеи: их названия не "
+            "наши. «CF Montreal» против «CF Montréal», «LA Galaxy» против "
+            "«Los Angeles Galaxy». Низкий процент по виду спорта означает не "
+            "отсутствие рынка, а то, что наш сопоставитель его не нашёл.</p>"
+            "<div class='bd-scroll'><table class='bd'><thead><tr><th>вид</th>"
+            "<th class='num'>сигналов</th><th class='num'>нашлись</th>"
+            "<th class='num'>покрытие</th><th class='num'>с зазором</th>"
+            "</tr></thead>"
+            f"<tbody>{''.join(crows)}</tbody></table></div>")
+
+    # --- результаты -------------------------------------------------------
+    t = res["total"]
+    if t["n"]:
+        def money(v):
+            return f"{v:+,.0f}$".replace(",", " ")
+        def line(label, a, note=""):
+            if not a["n"]:
+                return (f"<tr><td>{html.escape(label)}</td><td class='num'>0</td>"
+                        "<td class='num'>—</td><td class='num'>—</td>"
+                        "<td class='num'>—</td><td class='num'>—</td></tr>")
+            cls = "pos" if a["profit"] > 0 else ("neg" if a["profit"] < 0 else "")
+            return (f"<tr><td>{html.escape(label)}{note}</td>"
+                    f"<td class='num'>{a['n']}</td>"
+                    f"<td class='num'>{a['win_rate']:.0f}%</td>"
+                    f"<td class='num'>{a['staked']:,.0f}$".replace(",", " ") + "</td>"
+                    f"<td class='num {cls}'>{money(a['profit'])}</td>"
+                    f"<td class='num {cls}'>{a['roi']:+.0f}%</td></tr>")
+        rrows = [line("Всего по Polymarket", t)]
+        rrows.append(line("— прямая ставка", res["aggressive"]))
+        rrows.append(line("— двойной шанс", res["optimal"]))
+        for k in sorted(res["by_stars"], reverse=True):
+            rrows.append(line("★" * k + " " + STAR_LABELS.get(k, ""), res["by_stars"][k]))
+        rrows.append(line("из опубликованных сигналов", res["by_source"]["signal"]))
+        rrows.append(line("из отклонённых движений", res["by_source"]["movement"]))
+        results_html = (
+            "<h3 class='pm-h3'>Результаты по Polymarket</h3>"
+            "<p class='lead small'>Деньги считаются по <b>фактическому размеру</b>, "
+            "который держал стакан, и по фактическому среднему коэффициенту — не по "
+            "флэту. На ордербуке размер решает стакан, и сделка на $30 не равна "
+            f"сделке на ${POLYMARKET_TARGET_STAKE:.0f}; усреднить их одним флэтом "
+            "значило бы придумать доходность, которой не было. "
+            f"Ждут матча: {res['pending']}.</p>"
+            "<div class='bd-scroll'><table class='bd'><thead><tr><th>разрез</th>"
+            "<th class='num'>сделок</th><th class='num'>заход.</th>"
+            "<th class='num'>оборот</th><th class='num'>итог</th>"
+            "<th class='num'>доходность</th></tr></thead>"
+            f"<tbody>{''.join(rrows)}</tbody></table></div>")
+    else:
+        results_html = (
+            "<h3 class='pm-h3'>Результаты по Polymarket</h3>"
+            "<p class='lead small'>Ни одной сделки ещё не рассчитано. Строка "
+            "появится здесь после первого сыгравшего матча, по которому зазор "
+            "был найден. Пока сравнивать нечего, и рисовать таблицу нулей "
+            "вместо этого было бы враньём: пустая таблица читается как "
+            "измерение, а измерения ещё нет.</p>")
+
+    return f'''
+  <h2 id="polymarket"><span class="hash">#</span>Polymarket</h2>
+  <p class="lead">Основной инструмент. Логика простая: у букмекера выигрышный счёт
+  быстро упирается в лимиты и блокировки, а на Polymarket есть видимая глубина стакана,
+  нет банов и нет проблем с выводом. Мы приносим туда цену, которую нашли снаружи —
+  и ставим <b>только там, где Polymarket даёт коэффициент минимум на
+  {POLYMARKET_MIN_EDGE_PCT:g}% выше лучшей цены</b>, которую можно взять у конторы на
+  тот же исход. Ровно вровень или хуже — сделки нет.</p>
+  {kpis}
+  <p class="kpi-note">Каждый открытый сигнал опрашивается на Polymarket снова и снова
+  до самого стартового свистка, а не один раз при срабатывании. Причина замерена: весь
+  их открытый список матчей укладывается в трое суток, а наши сигналы приходят за
+  26–44 часа до старта, так что в момент сигнала рынка там часто ещё нет. Частота
+  подстраивается сама — за сутки до матча раз в пару часов, в последние часы каждый цикл.</p>
+
+  <h3 class="pm-h3">Открытые зазоры прямо сейчас</h3>
+  {live_html}
+
+  <h3 class="pm-h3">Звёзды Polymarket — это не звёзды сигнала</h3>
+  <p class="lead small">Наша обычная лестница считает, у скольких контор поехала линия.
+  Здесь это только один из трёх множителей, и не главный: сделку делает <b>зазор</b>,
+  а зазор без глубины — картинка, а не сделка. Пять процентов на двадцать долларов и
+  двенадцать на полный размер отличаются не степенью, а родом.</p>
+  <ul class="rungs">
+    <li>{_star_mark(2, word=True)}— зазор от {PM_STARS_2_EDGE:g}%, любой размер</li>
+    <li>{_star_mark(3, word=True)}— зазор от {PM_STARS_3_EDGE:g}% <b>и</b> влезает полный размер</li>
+    <li>{_star_mark(4, word=True)}— зазор от {PM_STARS_4_EDGE:g}%, полный размер <b>и</b> наш сигнал от {PM_STARS_4_MIN_BASE}★</li>
+  </ul>
+  <p class="lead small">Ноль звёзд означает «сделки нет», а не «плохая сделка»: ниже
+  порога мы просто не ставим, и смешивать эти два состояния нельзя.</p>
+
+  <h3 class="pm-h3">Две ставки на одно событие</h3>
+  <p class="lead small"><b>Прямая</b> — та же ставка, что мы поставили бы у конторы.
+  <b>Двойной шанс</b> — «наш побеждает или ничья»: отдельной строкой Polymarket его не
+  продаёт, но он там есть, потому что это ровно «соперник не победит», то есть токен
+  No на рынке победы соперника. Обе ноги смотрят в одну сторону и проигрывают вместе —
+  это не страховка, а два входа по разной цене. В теннисе ничьей нет, поэтому там
+  бывает только прямая.</p>
+
+  {cov_html}
+
+  {results_html}
+'''
+
+
+def _sport_label(key: str) -> str:
+    fam = storage._sport_family(key or "")
+    return fam if fam else (key or "—")
+
+
 def _pm_counterfactual_block(cf: dict) -> str:
     """The Polymarket rules we did not adopt, scored on the quote journal.
 
@@ -1690,6 +1878,15 @@ body::after{
 .nav .sp{flex:1}
 .nav a.link{color:var(--ink2);text-decoration:none;font-size:14px;font-weight:600;padding:6px 10px;border-radius:9px}
 .nav a.link:hover{color:var(--lime);background:rgba(200,255,46,.08)}
+/* Polymarket стал основой продукта, и в шапке он выделен ровно поэтому --
+   не украшением, а признанием того, где теперь центр тяжести. */
+.nav a.link.pm{color:var(--lime);background:rgba(200,255,46,.10);
+  border:1px solid rgba(200,255,46,.28)}
+.nav a.link.pm:hover{background:rgba(200,255,46,.18)}
+/* Подзаголовки внутри раздела Polymarket: он длинный, и без ритма читается
+   как одна простыня. */
+.pm-h3{font-family:Unbounded,sans-serif;font-size:15px;text-transform:uppercase;
+  letter-spacing:.02em;margin:30px 0 8px;color:var(--ink)}
 .pill{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:700;
   padding:6px 11px;border-radius:999px;border:1px solid var(--line2);white-space:nowrap}
 .pill.live{color:var(--lime);border-color:rgba(200,255,46,.35);background:rgba(200,255,46,.07)}
@@ -2055,6 +2252,7 @@ footer a{color:var(--ink2)}
       STEAM<span style="color:#c8ff2e">LINE</span>
     </span>
     <span class="sp"></span>
+    <a class="link pm" href="#polymarket">Polymarket</a>
     <a class="link" href="#feed">Сигналы</a>
     <a class="link" href="#active">Открытые</a>
     <a class="link" href="#moves">Движения</a>
@@ -2210,6 +2408,8 @@ $ticker
     $stats_aggressive
     $stats_optimal
   </div>
+
+  $polymarket_section
 
   $breakdown_block
 
@@ -2532,6 +2732,7 @@ def render_dashboard(summaries: list, quota: dict = None):
             storage.recent_bets(5, "prematch", "optimal")),
         breakdown_block=_breakdown_block(storage.breakdown_stats("prematch")),
         counterfactual_block=_pm_counterfactual_block(storage.pm_counterfactual()),
+        polymarket_section=_pm_section(),
         movements_table=_movements_table(storage.recent_movements(30)),
         movement_stats=_movement_stats(storage.movement_stats()),
         active_signals=_active_signals(active),

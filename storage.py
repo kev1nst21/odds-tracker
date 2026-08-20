@@ -1780,3 +1780,117 @@ def pm_live_feed(max_age_minutes: int = 30):
             (cutoff, now.isoformat()),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def pm_settled(limit: int = 500):
+    """Наши сделки на Polymarket, у которых матч уже сыгран.
+
+    Одна строка на (событие, исход, нога) — берётся ЛУЧШИЙ прошедший порог
+    взгляд, потому что именно его бот и мог взять: строка живёт в фиде, пока
+    зазор открыт, и бот заходит в неё один раз.
+    """
+    with _conn() as conn:
+        return conn.execute(
+            """
+            SELECT q.fixture_id, q.outcome_name, q.leg, q.source, q.sport_key,
+                   q.start_time, q.lead_hours, q.event_title, q.event_slug,
+                   q.entry_price, q.avg_coef, q.exec_stake_usd, q.edge_pct,
+                   q.fits_target, q.means,
+                   a.result AS result, a.stars AS base_stars,
+                   a.home_team AS home_team, a.away_team AS away_team,
+                   a.opt_result AS opt_result
+            FROM pm_quotes q
+            JOIN tracked_alerts a
+              ON a.fixture_id = q.fixture_id AND a.outcome_name = q.outcome_name
+             AND a.kind = 'prematch'
+            WHERE q.take = 1 AND a.resolved = 1
+              AND q.id IN (
+                  SELECT id FROM pm_quotes p2
+                  WHERE p2.fixture_id = q.fixture_id
+                    AND p2.outcome_name = q.outcome_name
+                    AND p2.leg = q.leg AND p2.take = 1
+                  ORDER BY p2.edge_pct DESC LIMIT 1)
+            ORDER BY q.start_time DESC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+
+def _pm_outcome(row) -> str:
+    """Which verdict applies to this leg.
+
+    The aggressive leg is the straight win, so it takes the signal's own
+    result. The optimal leg is the double chance, which wins on a draw too --
+    that is exactly what opt_result already records for the bookmaker version
+    of the same bet, so it is reused rather than re-derived.
+    """
+    if row["leg"] == "optimal" and row["opt_result"] in ("hit", "miss"):
+        return row["opt_result"]
+    return row["result"]
+
+
+def pm_results() -> dict:
+    """Deньги по Polymarket: по ногам, по звёздам и целиком.
+
+    Считается по ФАКТИЧЕСКОМУ исполнимому размеру и фактическому среднему
+    коэффициенту, а не по флэту. На ордербуке размер определяет стакан, и
+    сделка на $30 не равна сделке на $200 -- усреднять их одним флэтом значило
+    бы придумать доходность, которой не было.
+    """
+    import polymarket
+    rows = [r for r in pm_settled() if _pm_outcome(r) in ("hit", "miss")]
+
+    def agg(sel):
+        n = len(sel)
+        hits = sum(1 for r in sel if _pm_outcome(r) == "hit")
+        staked = sum(r["exec_stake_usd"] or 0 for r in sel)
+        profit = sum((r["exec_stake_usd"] or 0) * ((r["avg_coef"] or 1) - 1)
+                     if _pm_outcome(r) == "hit" else -(r["exec_stake_usd"] or 0)
+                     for r in sel)
+        edges = [r["edge_pct"] for r in sel if r["edge_pct"] is not None]
+        return {
+            "n": n, "hits": hits, "staked": round(staked, 2),
+            "profit": round(profit, 2),
+            "win_rate": round(hits / n * 100, 1) if n else None,
+            "roi": round(profit / staked * 100, 1) if staked else None,
+            "avg_edge": round(sum(edges) / len(edges), 2) if edges else None,
+        }
+
+    by_stars = {}
+    for r in rows:
+        k = polymarket.pm_stars(r["edge_pct"], r["exec_stake_usd"] or 0,
+                                r["base_stars"] or 0)
+        by_stars.setdefault(k, []).append(r)
+
+    return {
+        "total": agg(rows),
+        "aggressive": agg([r for r in rows if r["leg"] == "aggressive"]),
+        "optimal": agg([r for r in rows if r["leg"] == "optimal"]),
+        "by_stars": {k: agg(v) for k, v in sorted(by_stars.items(), reverse=True)},
+        "by_source": {s: agg([r for r in rows if r["source"] == s])
+                      for s in ("signal", "movement")},
+        "pending": len([r for r in pm_settled() if _pm_outcome(r) not in ("hit", "miss")]),
+    }
+
+
+def pm_coverage_by_sport(hours: int = 24 * 30):
+    """Где Polymarket вообще нас котирует. Считаем, а не предполагаем."""
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    with _conn() as conn:
+        rows = conn.execute(
+            """SELECT sport_key,
+                      COUNT(DISTINCT fixture_id || '|' || outcome_name) AS sigs,
+                      SUM(matched) AS matched_looks,
+                      MAX(take) AS any_take
+               FROM pm_quotes WHERE checked_at >= ? AND sport_key IS NOT NULL
+               GROUP BY sport_key""", (since,)).fetchall()
+        seen = conn.execute(
+            """SELECT sport_key,
+                      COUNT(DISTINCT CASE WHEN matched=1
+                            THEN fixture_id || '|' || outcome_name END) AS matched,
+                      COUNT(DISTINCT fixture_id || '|' || outcome_name) AS total,
+                      COUNT(DISTINCT CASE WHEN take=1
+                            THEN fixture_id || '|' || outcome_name END) AS took
+               FROM pm_quotes WHERE checked_at >= ? AND sport_key IS NOT NULL
+               GROUP BY sport_key ORDER BY total DESC""", (since,)).fetchall()
+    return [dict(r) for r in seen]
