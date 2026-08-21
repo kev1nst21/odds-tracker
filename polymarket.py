@@ -65,7 +65,11 @@ HTTP_TIMEOUT = 12
 HTTP_RETRIES = 2
 RETRY_BACKOFF = 0.7
 INDEX_PAGE = 100
-INDEX_MAX_PAGES = 20
+# 21.08: подняли с 20. По замеру в теге soccer на тот момент лежало 2100
+# открытых событий, то есть при двадцати страницах хвост в сотню событий
+# просто не доезжал -- и Genoa CFC vs. SSC Napoli, наш живой сигнал, лежал
+# ровно в этом хвосте, на двадцать второй странице.
+INDEX_MAX_PAGES = 45
 
 LAST_DIAG: dict[str, Any] = {}
 
@@ -198,12 +202,37 @@ def _dt(value: Any) -> Optional[datetime]:
 
 
 def _event_start(ev: dict) -> Optional[datetime]:
-    for k in ("gameStartTime", "startDate", "startTime"):
+    """Когда НАЧИНАЕТСЯ матч. Не когда рынок выставили.
+
+    21.08.2026 — здесь был баг, который в одиночку убивал весь футбол.
+
+    У событий Polymarket три даты, и они значат совсем разное:
+        startDate      — когда рынок ВЫСТАВИЛИ на площадку;
+        gameStartTime  — настоящее начало матча, но заполнено далеко не всегда
+                         (в теннисе есть, в футболе на замере было пусто);
+        endDate        — крайний срок расчёта, и для матчевых рынков это
+                         фактически и есть начало матча.
+
+    Прежний код читал startDate как начало матча. Для «Genoa CFC vs. SSC
+    Napoli» это давало 17.08 19:35 — момент листинга, — при том что матч
+    начинается 22.08 18:45. Проверка окна дат сравнивала наш реальный старт с
+    датой листинга, расходилась на четверо суток и отбрасывала событие. Так
+    отбрасывался КАЖДЫЙ футбольный матч: покрытие по футболу было 0 из 14, и
+    выглядело это как «Polymarket не котирует наши лиги», хотя котирует.
+
+    Порядок теперь такой: точное время, если оно есть; иначе срок расчёта,
+    который для матчевых рынков совпадает со стартом; startDate не
+    рассматривается как начало матча никогда.
+    """
+    for k in ("gameStartTime", "startTime"):
         d = _dt(ev.get(k))
         if d:
             return d
+    d = _dt(ev.get("endDate"))
+    if d:
+        return d
     for m in ev.get("markets") or []:
-        d = _dt(m.get("gameStartTime") or m.get("startDate"))
+        d = _dt(m.get("gameStartTime"))
         if d:
             return d
     return None
@@ -288,6 +317,42 @@ def build_index(force: bool = False) -> list[dict]:
         _INDEX["events"] = events
     LAST_DIAG["index_size"] = len(events)
     return _INDEX["events"]
+
+
+def merge_siblings(events: Iterable[dict]) -> list[dict]:
+    """Склеить события одной фикстуры в одно, со всеми рынками сразу.
+
+    Polymarket разносит один матч по нескольким событиям: голое «Genoa CFC vs.
+    SSC Napoli» несёт победу, «... - Player Props» несёт бомбардиров, «... -
+    Total Corners» угловые. Матчер брал ПЕРВОЕ подошедшее по названию — и если
+    первым оказывался props, мы уходили с событием, в котором нет ни одного
+    рынка на победу, и записывали «нет токена под наш исход». По журналу это
+    неотличимо от «рынка нет вовсе», хотя причины противоположные.
+
+    После склейки решение принимается по всем рынкам фикстуры сразу, а не по
+    тому, какой кусок попался первым.
+    """
+    by_base: dict[tuple, dict] = {}
+    for ev in events:
+        base = _strip_suffix(ev.get("title") or "")
+        start = _event_start(ev)
+        key = (base.lower(), start.date().isoformat() if start else "")
+        cur = by_base.get(key)
+        if cur is None:
+            merged = dict(ev)
+            merged["title"] = base
+            merged["markets"] = list(ev.get("markets") or [])
+            merged["_sources"] = 1
+            by_base[key] = merged
+            continue
+        cur["markets"].extend(ev.get("markets") or [])
+        cur["_sources"] += 1
+        # Голое событие -- носитель основного рынка, его slug и id
+        # предпочтительнее для ссылки.
+        if (ev.get("title") or "").strip() == base:
+            cur["slug"] = ev.get("slug") or cur.get("slug")
+            cur["id"] = ev.get("id") or cur.get("id")
+    return list(by_base.values())
 
 
 def match_event(events: Iterable[dict], home: str, away: str,
@@ -491,6 +556,7 @@ def check(home: str, away: str, start_iso: str, pick_name: str,
         idx = build_index() if events is None else events
         if not idx:
             return [{**base, "reason": "индекс пуст"}]
+        idx = merge_siblings(idx)
         ev = match_event(idx, home, away, start_iso)
         if not ev:
             return [{**base, "reason": "события нет на Polymarket",

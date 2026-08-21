@@ -127,9 +127,9 @@ assert pm._strip_suffix("Santos FC vs. SE Palmeiras - Exact Score") == \
     "Santos FC vs. SE Palmeiras"
 INDEX = [
     {"id": "1", "title": "Udinese Calcio vs. Venezia FC - Total Corners",
-     "startDate": "2026-08-20T18:00:00Z", "markets": []},
+     "startDate": "2026-08-15T09:00:00Z", "endDate": "2026-08-20T18:00:00Z", "markets": []},
     {"id": "2", "title": "Udinese Calcio vs. Venezia FC",
-     "startDate": "2026-08-20T18:00:00Z", "slug": "main",
+     "startDate": "2026-08-15T09:00:00Z", "endDate": "2026-08-20T18:00:00Z", "slug": "main",
      "markets": [{"question": "Udinese Calcio vs. Venezia FC",
                   "outcomes": '["Udinese Calcio","Venezia FC"]',
                   "clobTokenIds": '["tok-udi","tok-ven"]'}]},
@@ -151,6 +151,46 @@ print("claim ok: ставим на Venezia — берётся токен Venezia
 # значит получить красивый зазор из ничего.
 assert pm.match_event(INDEX, "Udinese", "Venezia", "2026-09-20T18:00:00Z") is None
 print("claim ok: тот же матч месяцем позже не подставляется под сегодняшний сигнал")
+
+# --- 10b. startDate — это ЛИСТИНГ, а не начало матча ------------------------
+# Баг, который 21.08 в одиночку убивал весь футбол: покрытие было 0 из 14, и
+# выглядело это как «Polymarket не котирует наши лиги». На деле «Genoa CFC vs.
+# SSC Napoli» был выставлен 17.08 в 19:35, а матч начинался 22.08 в 18:45 —
+# и проверка окна дат, читавшая startDate как начало, расходилась на четверо
+# суток и выбрасывала событие.
+real = {"title": "Genoa CFC vs. SSC Napoli",
+        "startDate": "2026-08-17T19:35:00Z",     # когда рынок выставили
+        "endDate": "2026-08-22T18:45:00Z",       # когда начинается матч
+        "markets": []}
+got = pm._event_start(real)
+assert got is not None and got.isoformat().startswith("2026-08-22T18:45"), got
+assert pm.match_event([real], "Genoa", "Napoli", "2026-08-22T18:45:00Z"), \
+    "матч не сматчился по настоящему времени старта"
+assert pm.match_event([real], "Genoa", "Napoli", "2026-08-17T19:35:00Z") is None, \
+    "событие сматчилось по дате ЛИСТИНГА — ровно тот баг, что убил футбол"
+print("claim ok: начало матча берётся из endDate, а дата листинга началом не считается")
+
+# --- 10c. props-событие не заслоняет основной рынок -------------------------
+# Polymarket разносит фикстуру по нескольким событиям. Матчер брал первое
+# подошедшее по названию, и если первым попадался «- Player Props», мы уходили
+# с событием без единого рынка на победу и писали «нет токена» — по журналу
+# неотличимо от «рынка нет вовсе», хотя причины противоположные.
+props = {"title": "Genoa CFC vs. SSC Napoli - Player Props",
+         "startDate": "2026-08-17T19:35:00Z", "endDate": "2026-08-22T18:45:00Z",
+         "markets": [{"question": "Rasmus Hojlund: Anytime Goalscorer",
+                      "outcomes": '["Yes","No"]', "clobTokenIds": '["a","b"]'}]}
+main = {"title": "Genoa CFC vs. SSC Napoli", "slug": "gen-nap",
+        "startDate": "2026-08-17T19:35:00Z", "endDate": "2026-08-22T18:45:00Z",
+        "markets": [{"question": "Genoa CFC vs. SSC Napoli",
+                     "outcomes": '["Genoa CFC","SSC Napoli"]',
+                     "clobTokenIds": '["tok-gen","tok-nap"]'}]}
+merged = pm.merge_siblings([props, main])
+assert len(merged) == 1, merged
+ev2 = pm.match_event(merged, "Genoa", "Napoli", "2026-08-22T18:45:00Z")
+legs2 = pm.find_legs(ev2, "SSC Napoli", "Genoa CFC", "SSC Napoli")
+assert legs2.get("aggressive", {}).get("token_id") == "tok-nap", legs2
+print("claim ok: события одной фикстуры склеиваются, и рынок победы находится "
+      "даже когда первым попался props")
 
 # --- 11. частота опроса подстраивается сама ---------------------------------
 # Просьба: «ты должен в процессе сам подстроится в плане как часто его обновлять

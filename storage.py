@@ -2009,7 +2009,8 @@ def pm_lag_profile():
     """
     with _conn() as conn:
         rows = conn.execute(
-            """SELECT lead_hours, pm_lag, take, edge_pct, exec_stake_usd
+            """SELECT lead_hours, pm_lag, take, edge_pct, exec_stake_usd,
+                      fixture_id, outcome_name, leg
                FROM pm_quotes WHERE matched=1 AND pm_lag IS NOT NULL"""
         ).fetchall()
     out = []
@@ -2024,13 +2025,25 @@ def pm_lag_profile():
         med = lags[mid] if len(lags) % 2 else (lags[mid - 1] + lags[mid]) / 2
         takes = [r for r in sel if r["take"]]
         edges = [r["edge_pct"] for r in takes if r["edge_pct"] is not None]
+        # ЧИСЛО СОБЫТИЙ, А НЕ ЧИСЛО ВЗГЛЯДОВ. Разница здесь не косметическая.
+        # Мы смотрим на каждый открытый сигнал заново каждые пять минут, и в
+        # корзине «3-12 ч» на 21.08 лежало 127 взглядов -- но всего на ДВА
+        # события. Медиана по взглядам выглядит как выборка из 127 наблюдений,
+        # хотя это одно и то же событие, посчитанное шестьдесят раз. Решать по
+        # такой цифре -- значит принять уверенность за знание. Поэтому наружу
+        # идут оба числа, и «событий» стоит первым.
+        events = {(r["fixture_id"], r["outcome_name"], r["leg"]) for r in sel}
+        take_events = {(r["fixture_id"], r["outcome_name"], r["leg"]) for r in takes}
         out.append({
-            "label": label, "n": len(sel),
+            "label": label,
+            "events": len(events),
+            "looks": len(sel),
+            "n": len(events),          # то, на что смотрят -- события
             "median_lag": round(med, 3),
             "share_behind": round(sum(1 for r in sel if r["pm_lag"] >= 0.5)
                                   / len(sel) * 100, 1),
-            "takes": len(takes),
-            "take_pct": round(len(takes) / len(sel) * 100, 1),
+            "takes": len(take_events),
+            "take_pct": round(len(take_events) / len(events) * 100, 1),
             "avg_edge": round(sum(edges) / len(edges), 2) if edges else None,
         })
     return out
