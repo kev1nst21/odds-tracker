@@ -30,6 +30,24 @@ now = datetime.now(timezone.utc)
 start = (now + timedelta(hours=4)).isoformat()
 
 
+# 21.08.2026 -- фикстура расширена с трёх контор до восьми.
+#
+# Не потому, что прежний тест был неправ: 01.08 он ловил настоящую поломку,
+# когда требование «минимум 4 конторы» отсеивало 6 падений из 6 и широкий
+# обход не давал ничего. Но с тех пор поменялась сама задача. Тогда малые лиги
+# были точкой роста на плане в 20 тысяч кредитов; сейчас у нас 126 лиг за цикл
+# и рынки по 40-54 конторы, а основой продукта стал Polymarket, который
+# латвийский второй дивизион и предварительные раунды Кубка Англии не котирует
+# в принципе.
+#
+# Поэтому порог глубины поднят до восьми, и фикстура приведена к тому, что
+# суть теста -- «малую лигу нельзя выбрасывать молча» -- проверяет на рынке,
+# который сегодня считается рынком. Само правило осталось: движение в малой
+# лиге обязано доходить и до сигнала, и до журнала движений.
+BOOKS = ["pinnacle", "betsson", "williamhill", "onexbet",
+         "marathonbet", "unibet", "betfair", "coolbet"]
+
+
 def row(book, side, price):
     return {"fixture_id": "small1", "sport_key": "soccer_latvia_2", "start_time": start,
             "home_team": "Riga II", "away_team": "Valmiera II", "bookmaker": book,
@@ -43,22 +61,25 @@ def move(book, prev, price, sharp=False):
             "pct_change": (price - prev) / prev, "is_sharp_book": sharp}
 
 
-# A three-bookmaker lower-division market. Two of them shortened 2.90 -> 2.55,
-# the third has not moved yet -- textbook steam, and previously invisible.
-records = [row("pinnacle", "home", 2.55), row("unibet_eu", "home", 2.55),
-           row("betsson", "home", 2.90),
-           row("pinnacle", "away", 1.45), row("unibet_eu", "away", 1.45),
-           row("betsson", "away", 1.40)]
-movements = [move("pinnacle", 2.90, 2.55, sharp=True), move("unibet_eu", 2.90, 2.55)]
+# Рынок нижнего дивизиона: восемь контор, три из них укоротили 2.90 -> 2.55,
+# остальные ещё стоят. Классический steam, который раньше был невидим.
+MOVERS = BOOKS[:3]
+records = ([row(b, "home", 2.55) for b in MOVERS]
+           + [row(b, "home", 2.90) for b in BOOKS[3:]]
+           + [row(b, "away", 1.45) for b in MOVERS]
+           + [row(b, "away", 1.40) for b in BOOKS[3:]])
+movements = [move(MOVERS[0], 2.90, 2.55, sharp=True)] + \
+            [move(b, 2.90, 2.55) for b in MOVERS[1:]]
 
 summaries = analytics.build_event_summaries(records, [], movements)
-assert summaries, "a 3-book market with two books moving produced no summary at all"
+assert summaries, "рынок малой лиги не дал сводки вообще"
 s = summaries[0]
-assert s["bet"], "no bet picked from a two-of-three steam move"
-assert s["alertable"], f"three-book steam move still not alertable: {s['verdict']}"
-assert s["bet"]["entry_book"] == "betsson", s["bet"]
-print(f"thin market ok: 2.90 -> 2.55 at 2 of 3 books, entry {s['bet']['entry_price']:.2f} "
-      f"at {s['bet']['entry_book']}, alertable={s['alertable']}")
+assert s["bet"], "из движения трёх контор не выбрана ставка"
+assert s["alertable"], f"движение в малой лиге не стало сигналом: {s['verdict']}"
+assert s["bet"]["entry_book"] in BOOKS[3:], s["bet"]
+print(f"thin market ok: 2.90 -> 2.55 у {len(MOVERS)} из {len(BOOKS)} контор, "
+      f"вход {s['bet']['entry_price']:.2f} у {s['bet']['entry_book']}, "
+      f"alertable={s['alertable']}")
 
 f = analytics.LAST_FUNNEL
 assert f["big_drop"] == 1 and f["signals"] == 1, f
@@ -69,13 +90,16 @@ print(f"funnel ok: {f}")
 # as a movement but never sent as a signal.
 storage.init_db()
 solo = analytics.build_event_summaries(
-    [row("unibet_eu", "home", 2.55), row("betsson", "home", 2.90),
-     row("williamhill", "home", 2.88),
-     row("unibet_eu", "away", 1.45), row("betsson", "away", 1.40),
-     row("williamhill", "away", 1.41)],
-    [], [move("unibet_eu", 2.90, 2.55)])
-assert solo, "a solo move must still be RECORDED, just not alerted"
-assert not solo[0]["alertable"], "one bookmaker moving was treated as a signal"
+    [row(BOOKS[0], "home", 2.55)] + [row(b, "home", 2.90) for b in BOOKS[1:]]
+    + [row(BOOKS[0], "away", 1.45)] + [row(b, "away", 1.40) for b in BOOKS[1:]],
+    [], [move(BOOKS[0], 2.90, 2.55, sharp=True)])
+assert solo, "одиночное движение обязано попасть в журнал, даже не став сигналом"
+assert not solo[0]["alertable"], (
+    "одна контора была принята за сигнал: " + str(solo[0]["verdict"])[:200])
+# Ведро называется thin_market, но ловит оно здесь другое: в нём оказывается
+# всё, что не набрало доказательности, а не только мелкий рынок. Имя ведра
+# осталось от 01.08, когда эти два случая совпадали. Проверяем то, что есть, а
+# не то, что хотелось бы прочитать по названию.
 assert analytics.LAST_FUNNEL["thin_market"] == 1, analytics.LAST_FUNNEL
 print("evidence ok: a single bookmaker moving is recorded but never alerted")
 

@@ -33,15 +33,23 @@ import main  # noqa: E402
 storage.DB_PATH = config.DB_PATH
 
 now = datetime.now(timezone.utc)
-BOOKS = ["pinnacle", "unibet_eu", "betsson", "williamhill", "onexbet"]
+# 21.08.2026 -- расширено с пяти контор до девяти, и двигаются теперь три, а
+# не две. Обе правки той же природы: порог глубины рынка поднят до восьми
+# контор, а бонус за острую контору больше не может в одиночку открыть
+# публикацию. Пятиконторный рынок с двумя двинувшимися перестал быть сигналом
+# по обеим причинам сразу, и это не поломка smoke-теста, а его устаревшая
+# фикстура: она описывала рынок, который сегодня рынком не считается.
+BOOKS = ["pinnacle", "unibet_eu", "betsson", "williamhill", "onexbet",
+         "marathonbet", "unibet", "betfair", "coolbet"]
 
 SPORTS = [{"key": "soccer_epl", "group": "Soccer", "title": "EPL", "active": True},
           {"key": "soccer_latvia_2", "group": "Soccer", "title": "Latvia 2", "active": True},
           {"key": "tennis_atp_x", "group": "Tennis", "title": "ATP", "active": True}]
 
-# Two books shorten the home side between the two cycles; the rest hold.
+# Три конторы укорачивают хозяев между циклами, остальные шесть стоят.
 CYCLE = 0
-DRIFTED = {"pinnacle": [2.90, 2.50], "unibet_eu": [2.90, 2.52]}
+DRIFTED = {"pinnacle": [2.90, 2.50], "unibet_eu": [2.90, 2.52],
+           "betsson": [2.90, 2.51]}
 
 
 def _event(sport_key):
@@ -79,9 +87,9 @@ with storage._conn() as conn:
 CYCLE = 1
 summaries = main.run_once()
 
-assert summaries, "a 14% drop at two books produced no summary"
+assert summaries, "падение 14% у трёх контор не дало сводки"
 s = summaries[0]
-assert s["bet"]["down_count"] == 2, s["bet"]
+assert s["bet"]["down_count"] == 3, s["bet"]
 assert s["alertable"], f"not alertable: {s.get('verdict')}"
 print(f"smoke ok: {len(summaries)} event(s), "
       f"{s['bet']['old_price']:.2f} -> {s['bet']['new_price']:.2f} at "
