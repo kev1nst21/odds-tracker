@@ -309,3 +309,57 @@ assert pm.pm_stars(lag=0.1, down_count=1, books_count=50,
 print("claim ok: всё, что прошло правило входа, имеет минимум две звезды")
 
 print("polymarket: все инварианты пройдены")
+
+
+# --- 17. воронка развёрнута: кандидаты не ограничены нашими сигналами -------
+# 21.08.2026. До этого дня мы спрашивали площадку только про то, что уже стало
+# нашим сигналом или движением — 17 кандидатов за всё время. Но зазор на
+# ордербуке не требует движения у контор: он требует ровно одного — чтобы там
+# цена была не хуже нашей. Пара может стоять мёртвой у всех шестидесяти
+# букмекеров, а Polymarket держать её выше просто потому, что туда никто не
+# заглядывал.
+import storage as _st  # noqa: E402
+from datetime import datetime as _dt2, timedelta as _td2, timezone as _tz2  # noqa: E402
+
+_st.init_db()
+_soon = (_dt2.now(_tz2.utc) + _td2(hours=8)).isoformat()
+_recs = []
+for _i, _b in enumerate(["pinnacle", "betsson", "unibet", "williamhill", "onexbet"]):
+    _recs += [{"fixture_id": "quiet1", "sport_key": "soccer_q", "start_time": _soon,
+               "home_team": "Quiet", "away_team": "Still", "bookmaker": _b,
+               "market_id": "h2h", "outcome_id": "home", "outcome_name": "Quiet",
+               "player_key": "-", "price": 3.00 + _i * 0.05, "label": "Quiet"}]
+_st.save_snapshot(_recs, _dt2.now(_tz2.utc).isoformat())
+
+_uni = _st.pm_universe(min_books=config.PM_UNIVERSE_MIN_BOOKS)
+_hit = [r for r in _uni if r["fixture_id"] == "quiet1"]
+assert _hit, "пара без единого движения не попала в множество кандидатов"
+assert _hit[0]["entry_price"] == 3.20, _hit[0]      # лучшая из пяти, не первая
+assert _hit[0]["down_count"] == 0 and _hit[0]["old_price"] is None, _hit[0]
+print(f"claim ok: событие, где НИЧЕГО не двигалось, попадает в кандидаты с "
+      f"лучшей ценой {_hit[0]['entry_price']:.2f} из {_hit[0]['books_count']} контор")
+
+# И отставание для такой пары не выдумывается: движения не было, мерить нечего.
+assert pm.pm_lag(3.5, _hit[0]["old_price"], _hit[0]["new_price"]) is None
+assert pm.pm_stars(lag=None, down_count=0, books_count=5, exec_stake=200,
+                   edge_pct=1.0) == 2
+print("claim ok: без движения отставание не считается, а оценка падает до "
+      "нижней ступени вместо выдуманной")
+
+# --- 18. лестница порогов считает СДЕЛКИ, а не взгляды ----------------------
+# Мы смотрим на одно событие десятки раз. Считать каждый взгляд отдельной
+# возможностью значило бы умножить объём на частоту опроса и отчитаться о
+# сотнях сделок там, где их две.
+for _k in range(4):
+    _st.save_pm_quote({"checked_at": f"2026-08-21T1{_k}:00:00", "fixture_id": "L1",
+                       "outcome_name": "Same", "leg": "aggressive", "matched": True,
+                       "take": False, "entry_price": 4.00,
+                       "best_coef": 4.00 + _k * 0.05, "source": "universe"})
+_lad = _st.pm_threshold_ladder()
+assert _lad["trades_seen"] >= 1
+_at0 = next(s_["trades"] for s_ in _lad["steps"] if s_["threshold"] == 0.0)
+assert _at0 >= 1, _lad
+_neg = next(s_["trades"] for s_ in _lad["steps"] if s_["threshold"] == -2.0)
+assert _neg >= _at0, "порог мягче обязан открывать не меньше сделок"
+print(f"claim ok: четыре взгляда на одно событие — это одна сделка в лестнице "
+      f"(при 0%: {_at0}, при -2%: {_neg})")

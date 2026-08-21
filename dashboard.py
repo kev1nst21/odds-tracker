@@ -1013,6 +1013,117 @@ def _breakdown_block(bd: dict) -> str:
     )
 
 
+def _pm_bets_block() -> str:
+    """Самое простое, чего на странице не было: СПИСОК СТАВОК.
+
+    21.08.2026: «вроде 3 ставки у нас должно было быть, по итогу непонятно
+    где они, как открыть глянуть на что бы мы поставили».
+
+    Справедливо, и это моя вина. На странице лежали покрытие, отставание,
+    распределения и карта эджа во времени -- всё, кроме той единственной
+    таблицы, ради которой всё остальное строится. Здесь одна строка на сделку
+    и ни одного нового понятия: что, когда, по какой цене у конторы, по какой
+    на площадке, на сколько влезли и чем кончилось.
+    """
+    bets = storage.pm_bets(limit=60)
+    if not bets:
+        return ("<h3 class='pm-h3'>Наши ставки на Polymarket</h3>"
+                "<p class='lead small'>Пока ни одной. Строка появляется здесь в "
+                "тот момент, когда на площадке цена оказывается не хуже нашей "
+                "конторы и стакан держит объём — до тех пор ставить нечего, и "
+                "пустая таблица это честный ответ, а не отсутствие данных.</p>")
+    rows = []
+    won = lost = 0
+    pnl_total = 0.0
+    for b in bets:
+        leg = "прямая" if b["leg"] == "aggressive" else "двойной шанс"
+        if b["resolved"] and b["result"] == "hit":
+            status, cls, won = "зашла", "pos", won + 1
+        elif b["resolved"] and b["result"] == "miss":
+            status, cls, lost = "не зашла", "neg", lost + 1
+        else:
+            status, cls = "ждём матч", "dim"
+        if b["pnl"] is not None:
+            pnl_total += b["pnl"]
+            money = f"<span class='{cls}'>{b['pnl']:+,.0f}$</span>".replace(",", " ")
+        else:
+            money = "<span class='dim'>—</span>"
+        когда = (b["checked_at"] or "")[5:16].replace("T", " ")
+        rows.append(
+            f"<tr><td>{html.escape(когда)}</td>"
+            f"<td>{html.escape(str(b['event_title'] or '—'))}</td>"
+            f"<td><b>{html.escape(str(b['outcome_name']))}</b><br>"
+            f"<span class='dim'>{leg}</span></td>"
+            f"<td class='num'>{b['entry_price']:.2f}</td>"
+            f"<td class='num'><b>{(b['avg_coef'] or 0):.2f}</b></td>"
+            f"<td class='num pos'>+{(b['edge_pct'] or 0):.1f}%</td>"
+            f"<td class='num'>${(b['exec_stake_usd'] or 0):.0f}</td>"
+            f"<td class='{cls}'>{status}</td>"
+            f"<td class='num'>{money}</td></tr>")
+    settled = won + lost
+    head = (f"Ставок: <b>{len(bets)}</b>. Рассчитано <b>{settled}</b>"
+            + (f", из них зашло <b>{won}</b>, итог "
+               f"<b>{pnl_total:+,.0f}$</b>".replace(",", " ") if settled else "")
+            + f", ждут матча <b>{len(bets) - settled}</b>.")
+    return ("<h3 class='pm-h3'>Наши ставки на Polymarket</h3>"
+            f"<p class='lead small'>{head} Цена у конторы — лучшая, которую мы "
+            "могли взять на тот же исход; цена на площадке — средняя по стакану "
+            "на ту сумму, которая реально влезла.</p>"
+            "<div class='bd-scroll'><table class='bd'><thead><tr>"
+            "<th>когда</th><th>событие</th><th>на что</th>"
+            "<th class='num'>контора</th><th class='num'>Polymarket</th>"
+            "<th class='num'>лучше на</th><th class='num'>сумма</th>"
+            "<th>итог</th><th class='num'>деньги</th>"
+            f"</tr></thead><tbody>{''.join(rows)}</tbody></table></div>")
+
+
+def _pm_ladder_block() -> str:
+    """Сколько сделок открылось бы при другом пороге. Ответ числом, не мнением.
+
+    21.08: «может снизить требования от количества контор, или коф взять от
+    минус 2 процентов».
+
+    Идея про минус два процента не абсурдная, и у неё есть настоящее
+    основание: цена на два процента хуже, но которую РЕАЛЬНО можно взять в
+    размере и повторить завтра, лучше цены, которую у букмекера урежут лимитом
+    или закроют счётом. Но это пока рассуждение. Здесь оно превращается в
+    таблицу: видно, сколько сделок добавит каждая ступень, и решать можно по
+    числу.
+    """
+    L = storage.pm_threshold_ladder()
+    if not L.get("trades_seen"):
+        return ""
+    cur = POLYMARKET_MIN_EDGE_PCT
+    now_n = next((s["trades"] for s in L["steps"] if s["threshold"] == cur), None)
+    rows = []
+    for st_ in L["steps"]:
+        t = st_["threshold"]
+        mark = " ← сейчас" if t == cur else ""
+        label = ("не хуже конторы" if t == 0 else
+                 f"хуже конторы на {abs(t):g}%" if t < 0 else f"лучше на {t:g}%")
+        delta = ""
+        if now_n is not None and t != cur:
+            d = st_["trades"] - now_n
+            delta = f"<span class='{'pos' if d > 0 else 'dim'}'>{d:+d}</span>" if d else "—"
+        rows.append(
+            f"<tr{' class=cur' if t == cur else ''}><td>{t:+g}%{mark}</td>"
+            f"<td>{label}</td><td class='num'>{st_['trades']}</td>"
+            f"<td class='num'>{delta}</td></tr>")
+    return ("<h3 class='pm-h3'>Если бы порог был другим</h3>"
+            f"<p class='lead small'>Всего разных сделок мы увидели "
+            f"<b>{L['trades_seen']}</b>, медианный зазор по ним "
+            f"<b>{L['median_gap']:+.2f}%</b>, лучший <b>{L['best_gap']:+.2f}%</b>. "
+            "Каждая сделка считается один раз, по лучшему из взглядов — иначе "
+            "объём умножился бы на частоту опроса. Отрицательные ступени "
+            "означают, что мы сознательно берём цену хуже конторской: смысл в "
+            "этом есть только если у конторы взять нельзя — лимит, бан, "
+            "невывод. Пока это не проверено живой сделкой, ставим от нуля.</p>"
+            "<div class='bd-scroll'><table class='bd'><thead><tr>"
+            "<th>порог</th><th>что это значит</th><th class='num'>сделок</th>"
+            f"<th class='num'>против сейчас</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table></div>")
+
+
 def _pm_gap_block() -> str:
     """История зазоров: сколько живут, где были лучшими, как затухают.
 
@@ -1292,6 +1403,10 @@ def _pm_section() -> str:
   No на рынке победы соперника. Обе ноги смотрят в одну сторону и проигрывают вместе —
   это не страховка, а два входа по разной цене. В теннисе ничьей нет, поэтому там
   бывает только прямая.</p>
+
+  {_pm_bets_block()}
+
+  {_pm_ladder_block()}
 
   {cov_html}
 

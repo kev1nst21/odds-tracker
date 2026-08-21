@@ -6,6 +6,9 @@ import traceback
 from datetime import datetime, timedelta, timezone
 
 from config import (
+    PM_MAX_BOOKS_PER_CYCLE,
+    PM_UNIVERSE_LIMIT,
+    PM_UNIVERSE_MIN_BOOKS,
     POLYMARKET_ENABLED,
     DASHBOARD_URL,
     SPIKE_THRESHOLD_PCT,
@@ -218,12 +221,29 @@ def _sweep_polymarket(now):
     from datetime import datetime as _dt
 
     cands = storage.pm_candidates()
+    # РАЗВОРОТ ВОРОНКИ, 21.08. До этого дня здесь были только наши сигналы и
+    # движения -- 17 кандидатов за всё время существования. Но зазор на
+    # ордербуке не требует движения у контор: он требует ровно одного -- чтобы
+    # там цена была не хуже нашей. Пара может стоять мёртвой у всех шестидесяти
+    # букмекеров, а Polymarket всё это время держать её выше просто потому, что
+    # туда никто не заглядывал. Поэтому берём ВСЁ, что мы котируем.
+    known = {(r["fixture_id"], r["outcome_name"]) for r in cands}
+    for r in storage.pm_universe(limit=PM_UNIVERSE_LIMIT,
+                                 min_books=PM_UNIVERSE_MIN_BOOKS):
+        if (r["fixture_id"], r["outcome_name"]) not in known:
+            cands.append(r)
     if not cands:
         return 0, 0
 
     index = polymarket.build_index()
+    merged = polymarket.merge_siblings(index)
     looks = takes = 0
     alerts = []
+    # Сопоставление имён локальное и бесплатное, поэтому по списку событий
+    # прогоняем всех кандидатов. Платим временем только за стакан -- его и
+    # ограничиваем, чтобы цикл опроса котировок не растянулся из-за побочной
+    # задачи, какой бы важной она ни стала.
+    budget_books = PM_MAX_BOOKS_PER_CYCLE
     for row in cands:
         start = row.get("start_time")
         try:
@@ -251,7 +271,7 @@ def _sweep_polymarket(now):
         for res in polymarket.check(
                 row["home_team"], row["away_team"], str(start),
                 row["outcome_name"], row.get("entry_price"),
-                opt_price=row.get("opt_price"), events=index,
+                opt_price=row.get("opt_price"), events=merged,
                 old_price=row.get("old_price"), new_price=row.get("new_price"),
                 down_count=row.get("down_count") or 0,
                 books_count=row.get("books_count") or 0):

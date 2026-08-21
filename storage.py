@@ -2070,3 +2070,174 @@ def pm_gap_summary() -> dict:
                    for leg in ("aggressive", "optimal")},
         "profile": pm_lag_profile(),
     }
+
+
+def pm_universe(limit: int = 1200, min_books: int = 4):
+    """КАЖДАЯ будущая пара, которую мы котируем, с лучшей ценой по рынку.
+
+    Добавлено 21.08.2026. До этого дня воронка Polymarket была вывернута не в
+    ту сторону, и это стоило нам почти всего объёма.
+
+    Мы спрашивали площадку только про то, что УЖЕ стало нашим сигналом или
+    хотя бы движением: 17 кандидатов за всё время. Но зазор на ордербуке не
+    требует никакого движения у контор — он требует ровно одного: чтобы там
+    цена была не хуже нашей. Событие может стоять мёртвым у всех шестидесяти
+    букмекеров, а Polymarket всё это время держать её на десять процентов
+    выше просто потому, что туда никто не заглядывал.
+
+    Наши фильтры — падение на десять процентов, три конторы, полоса
+    коэффициентов, доступный вход — писались под БУКМЕКЕРА, где плохой вход
+    означает урезанный или отменённый купон. К ордербуку они отношения не
+    имеют вовсе, и пропускать через них кандидатов на Polymarket значило
+    выбрасывать деньги по правилу, написанному для другого места.
+
+    Поэтому здесь берётся ВСЁ, что мы котируем: каждая будущая пара, каждый
+    исход, лучшая цена среди контор как база сравнения. Кредитов это не стоит
+    ни одного — данные уже лежат в снимке, а оба эндпоинта Polymarket
+    бесплатны. Цена решения — только время цикла.
+
+    min_books отсекает пары, у которых цену держат две-три конторы: там
+    «лучшая цена» — это не рынок, а случайность, и сравнивать с ней нечего.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with _conn() as conn:
+        rows = conn.execute(
+            """
+            WITH latest AS (
+                SELECT fixture_id, sport_key, start_time, home_team, away_team,
+                       bookmaker, outcome_id, label, price,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY fixture_id, bookmaker, outcome_id
+                           ORDER BY fetched_at DESC) AS rn
+                FROM odds_snapshots
+                WHERE market_id = 'h2h' AND start_time > ? AND price > 1.0
+            )
+            SELECT fixture_id, sport_key, start_time, home_team, away_team,
+                   outcome_id, MAX(label) AS label,
+                   COUNT(*) AS books_count,
+                   MAX(price) AS best_price
+            FROM latest
+            WHERE rn = 1
+            GROUP BY fixture_id, outcome_id
+            HAVING COUNT(*) >= ?
+            ORDER BY start_time ASC
+            LIMIT ?
+            """,
+            (now, int(min_books), int(limit)),
+        ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        # В снимке имя исхода лежит в label, а не в outcome_name -- сторона
+        # ("home"/"away") и её подпись хранятся раздельно. Если подписи нет,
+        # восстанавливаем по стороне: без имени исхода матчить нечего.
+        name = d.pop("label", None)
+        if not name:
+            name = d["home_team"] if d["outcome_id"] == "home" else d["away_team"]
+        d["outcome_name"] = name
+        d.update({
+            "source": "universe",
+            "entry_price": d.pop("best_price"),
+            "opt_price": None,
+            # Движения не было, значит и отставание мерить не от чего. Ноль
+            # здесь был бы враньём: мы не знаем, что рынок стоял -- мы знаем,
+            # что мы не видели, чтобы он двигался.
+            "old_price": None, "new_price": None,
+            "down_count": 0, "stars": 0,
+        })
+        out.append(d)
+    return out
+
+
+def pm_bets(limit: int = 100):
+    """ПРОСТОЙ СПИСОК: что именно мы поставили бы на Polymarket и чем кончилось.
+
+    21.08.2026, дословно: «вроде 3 ставки у нас должно было быть, по итогу
+    непонятно где они, как открыть глянуть на что бы мы поставили».
+
+    Справедливо. На странице лежали покрытие, отставание, распределения и
+    карта эджа во времени — всё, кроме самой простой вещи: списка ставок. Одна
+    строка на сделку, человеческим языком, без единого нового понятия.
+
+    Берётся ЛУЧШИЙ взгляд на каждую сделку — тот, где зазор был максимальным.
+    Мы смотрим на одно и то же событие десятки раз, и показывать последний
+    взгляд значило бы показывать момент, когда зазор уже закрылся.
+    """
+    with _conn() as conn:
+        rows = conn.execute(
+            """SELECT fixture_id, outcome_name, leg, source, sport_key,
+                      event_title, event_slug, start_time, checked_at,
+                      lead_hours, entry_price, avg_coef, best_coef, edge_pct,
+                      exec_stake_usd, fits_target, pm_lag, means, token_id
+               FROM pm_quotes
+               WHERE take = 1
+               ORDER BY fixture_id, outcome_name, leg, edge_pct DESC"""
+        ).fetchall()
+    best: dict[tuple, dict] = {}
+    for r in rows:
+        key = (r["fixture_id"], r["outcome_name"], r["leg"])
+        if key not in best:
+            best[key] = dict(r)
+
+    # Результат берём из книги сигналов: ставка на Polymarket ставится на тот
+    # же исход, поэтому и рассчитывается тем же исходом.
+    with _conn() as conn:
+        res = {(x["fixture_id"], x["outcome_name"]): (x["result"], x["resolved"])
+               for x in conn.execute(
+                   """SELECT fixture_id, outcome_name, result, resolved
+                      FROM tracked_alerts WHERE kind='prematch'""")}
+    out = []
+    for (fid, pick, leg), d in best.items():
+        result, resolved = res.get((fid, pick), (None, 0))
+        stake = d.get("exec_stake_usd") or 0.0
+        coef = d.get("avg_coef") or 0.0
+        if resolved and result == "hit":
+            pnl = stake * (coef - 1.0)
+        elif resolved and result == "miss":
+            pnl = -stake
+        else:
+            pnl = None
+        d.update({"result": result, "resolved": bool(resolved),
+                  "pnl": round(pnl, 2) if pnl is not None else None})
+        out.append(d)
+    out.sort(key=lambda d: d.get("checked_at") or "", reverse=True)
+    return out[:limit]
+
+
+# Ступени порога для разбора «а если бы брали иначе». Отрицательные --
+# намеренно: 21.08 прозвучало предложение «коф взять от минус 2 процентов».
+# Идея не абсурдная, у неё есть настоящее основание -- цена на два процента
+# хуже, но которую РЕАЛЬНО можно взять в размере и повторить завтра, лучше
+# цены, которую у букмекера урежут лимитом или закроют счётом. Но это пока
+# рассуждение, а не факт, и решать такое надо по числам, а не по ощущению.
+PM_LADDER_STEPS = (-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 5.0, 8.0)
+
+
+def pm_threshold_ladder():
+    """Сколько сделок открылось бы при каждом пороге. Считается по всем взглядам.
+
+    Отвечает ровно на вопрос «может, коф взять от минус двух процентов» —
+    числом, а не мнением. Одна сделка считается один раз, по лучшему из
+    взглядов: смотрим мы на событие десятки раз, и считать каждый взгляд
+    отдельной возможностью значило бы умножить объём на частоту опроса.
+    """
+    with _conn() as conn:
+        rows = conn.execute(
+            """SELECT fixture_id, outcome_name, leg, entry_price, best_coef
+               FROM pm_quotes
+               WHERE matched=1 AND best_coef IS NOT NULL AND entry_price > 1.0"""
+        ).fetchall()
+    best: dict[tuple, float] = {}
+    for r in rows:
+        gap = (r["best_coef"] / r["entry_price"] - 1.0) * 100.0
+        key = (r["fixture_id"], r["outcome_name"], r["leg"])
+        if gap > best.get(key, -10 ** 6):
+            best[key] = gap
+    gaps = sorted(best.values(), reverse=True)
+    return {
+        "trades_seen": len(gaps),
+        "median_gap": round(gaps[len(gaps) // 2], 2) if gaps else None,
+        "best_gap": round(gaps[0], 2) if gaps else None,
+        "steps": [{"threshold": t,
+                   "trades": sum(1 for g in gaps if g >= t)} for t in PM_LADDER_STEPS],
+    }
